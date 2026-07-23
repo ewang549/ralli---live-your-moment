@@ -28,6 +28,7 @@ let clipDuration: TimeInterval = CaptureContext.pulse.maxClipDuration
 
 // Spec-name parity: the design docs refer to these models by these names.
 typealias UserProfile = Friend
+typealias GroupChat = Chat
 typealias ActivityItem = Beacon
 typealias ChatMessage = Message
 
@@ -54,6 +55,10 @@ final class Friend {
     /// Marks a row created by `SeedData` so demo content can be loaded and
     /// cleared independently of real accounts and real friends.
     var isDemo: Bool = false
+
+    /// Unique, user-facing lookup ID — what you type into "Add friend".
+    /// Mirrors the Firestore handle for real accounts; demo rows get a local one.
+    var userId: String = ""
 
     // Profile metadata (UserProfileView).
     var email: String = ""
@@ -85,6 +90,35 @@ final class Friend {
         self.messages = []
         self.hostedBeacons = []
         self.joinedBeacons = []
+    }
+
+    // MARK: - Home-list display values
+    //
+    // Computed rather than stored so a row can never show a caption or streak
+    // that a newer clip has already replaced.
+
+    /// Caption from this person's most recent log — the status line under
+    /// their name in the home list.
+    var latestCaption: String {
+        clips.max { $0.capturedAt < $1.capturedAt }?.label ?? ""
+    }
+
+    /// Streak for the 1-on-1 with this person. Deliberately *not* the max
+    /// across their chats — that would paint every member of a hot group chat
+    /// with the group's streak, which reads as a personal one.
+    var streakCount: Int {
+        chats.first { !$0.isGroup }?.streak ?? 0
+    }
+
+    /// Most recent clip, used by the stacked video feeds.
+    var latestClip: Clip? {
+        clips.max { $0.capturedAt < $1.capturedAt }
+    }
+
+    /// "@handle" when the account is real, otherwise the local lookup ID.
+    var displayUserId: String {
+        let value = userId.isEmpty ? handle : userId
+        return value.isEmpty ? "" : "@\(value)"
     }
 }
 
@@ -127,6 +161,28 @@ final class Chat {
 
     var sortedClips: [Clip] {
         clips.sorted { $0.capturedAt > $1.capturedAt }
+    }
+
+    // MARK: - GroupChat display values (spec parity)
+
+    /// Stable unique ID for the group, used for routing and Stream channels.
+    var userId: String { id.uuidString }
+
+    /// Caption from the most recent log in this chat, shown under the name.
+    var latestCaption: String {
+        guard let latest = sortedClips.first else { return "" }
+        let author = latest.author?.name ?? ""
+        return author.isEmpty ? latest.label : "\(author): \(latest.label)"
+    }
+
+    /// Spec-named alias for `streak`.
+    var streakCount: Int { streak }
+
+    /// One current clip per member — the group's stacked video feed.
+    var memberClips: [Clip] {
+        members.compactMap { member in
+            sortedClips.first { $0.author?.id == member.id }
+        }
     }
 
     func latestClip(by friend: Friend) -> Clip? {

@@ -208,6 +208,67 @@ exports.resolveFriendCode = onCall(async (request) => {
 });
 
 /**
+ * Callable: lookupUser({ query }) -> { profile }
+ *
+ * "Add friend by User ID". Accepts either a handle or a friend code, because
+ * people don't reliably know which one they were given. Rate limited on the
+ * same limiter as resolveFriendCode — both are directory lookups keyed on a
+ * short, guessable string.
+ */
+exports.lookupUser = onCall(async (request) => {
+  const uid = requireAuth(request);
+
+  const raw = (request.data || {}).query;
+  if (typeof raw !== "string" || !raw.trim()) {
+    throw new HttpsError("invalid-argument", "Enter a User ID.");
+  }
+  const value = raw.trim().replace(/^@/, "");
+
+  const limiter = await enforceRateLimit(uid, "lookupUser", {
+    maxAttempts: 20,
+    windowMs: 5 * 60 * 1000,
+    maxFailures: 25,
+    lockoutMs: 30 * 60 * 1000,
+  });
+
+  // Try the handle first, then fall back to treating it as a friend code.
+  let targetUid = null;
+
+  const handle = value.toLowerCase();
+  if (HANDLE_PATTERN.test(handle)) {
+    const handleSnap = await db.doc(`handles/${handle}`).get();
+    if (handleSnap.exists) targetUid = handleSnap.data().uid;
+  }
+
+  if (!targetUid) {
+    const code = value.toUpperCase().replace(/[\s-]/g, "");
+    if (/^[A-Z0-9]{4,12}$/.test(code)) {
+      const codeSnap = await db.doc(`friendCodes/${code}`).get();
+      if (codeSnap.exists) targetUid = codeSnap.data().uid;
+    }
+  }
+
+  if (!targetUid) {
+    await limiter.record(false);
+    throw new HttpsError("not-found", "No one found with that ID.");
+  }
+
+  if (targetUid === uid) {
+    await limiter.record(true);
+    throw new HttpsError("invalid-argument", "That's you.");
+  }
+
+  const target = await db.doc(`users/${targetUid}`).get();
+  if (!target.exists) {
+    await limiter.record(false);
+    throw new HttpsError("not-found", "No one found with that ID.");
+  }
+
+  await limiter.record(true);
+  return { profile: publicProfile(target.data()) };
+});
+
+/**
  * Callable: checkHandleAvailable({ handle }) -> { available, reason? }
  *
  * Live validation while the user types during onboarding. Cheap read of the

@@ -40,7 +40,7 @@ struct MainTabView: View {
             Group {
                 switch router.tab {
                 case .profile: UserProfileView()
-                case .pulse: PulseFeedView()
+                case .pulse: PulseHomeView()
                 case .places: NichePlacesView()
                 case .beacons: BeaconsFeedView()
                 }

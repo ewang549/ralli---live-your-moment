@@ -141,6 +141,15 @@ enum FirestoreService {
 
     // MARK: Writes (via callables)
 
+    /// "Add friend by User ID" — resolves a handle *or* a friend code.
+    /// Rate limited server-side; a lockout surfaces as a CallableError.
+    static func lookupUser(_ query: String) async throws -> RemoteProfile {
+        let response = try await CallableFunctions.call("lookupUser",
+                                                        data: ["query": query],
+                                                        as: ProfileResponse.self)
+        return response.profile
+    }
+
     static func checkHandleAvailable(_ handle: String) async throws -> HandleAvailability {
         try await CallableFunctions.call("checkHandleAvailable",
                                          data: ["handle": handle],
