@@ -38,24 +38,27 @@ struct MessageThreadView: View {
                 }
             }
 
-            // Real-time input bar with send.
+            // Real-time input bar with send — glass field, gold send.
             HStack(spacing: 10) {
                 TextField("Message…", text: $draft)
                     .textFieldStyle(.plain)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Capsule().fill(Theme.surfaceLight))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background {
+                        Capsule().fill(.ultraThinMaterial)
+                            .overlay {
+                                Capsule().strokeBorder(Theme.glassRimTop.opacity(0.35), lineWidth: 1)
+                            }
+                    }
                     .foregroundStyle(Theme.textPrimary)
                     .onSubmit(send)
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 30))
-                        .foregroundStyle(draft.isEmpty ? Theme.textSecondary : Theme.accent)
-                }
-                .disabled(draft.isEmpty)
+                SendButton(enabled: !draft.isEmpty, action: send)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+            .background {
+                Rectangle().fill(.ultraThinMaterial).ignoresSafeArea(edges: .bottom)
+            }
         }
     }
 
@@ -67,6 +70,31 @@ struct MessageThreadView: View {
         chat.messages.append(message)
         try? modelContext.save()
         draft = ""
+    }
+}
+
+/// The one gold control in a thread: a metal disc that dims to glass when
+/// there's nothing to send. Shared by every composer in the app.
+struct SendButton: View {
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(enabled ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textSecondary))
+                .frame(width: 38, height: 38)
+                .background {
+                    Circle()
+                        .fill(enabled ? AnyShapeStyle(Theme.goldSheen) : AnyShapeStyle(Material.ultraThinMaterial))
+                        .shadow(color: enabled ? Theme.goldGlow.opacity(0.5) : .clear, radius: 10)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .animation(.easeOut(duration: 0.18), value: enabled)
+        .accessibilityLabel("Send")
     }
 }
 
@@ -91,7 +119,7 @@ struct ChatDrawerView: View {
                 MessageThreadView(chat: chat)
             }
         }
-        .background(Theme.surface)
+        .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
@@ -102,6 +130,10 @@ struct ChatDrawerView: View {
 
 struct ChatDetailView: View {
     let chat: Chat
+    /// Set when the thread is presented modally (from the Pulse list) so it
+    /// gets an ✕. When pushed onto a nav stack this stays nil and the system
+    /// back button handles dismissal — no double affordance.
+    var onClose: (() -> Void)?
 
     var body: some View {
         Group {
@@ -114,18 +146,21 @@ struct ChatDetailView: View {
                 MessageThreadView(chat: chat)
             }
         }
-            // Clear the floating tab bar so the input bar stays reachable.
-            .padding(.bottom, 84)
-            .background(Theme.background.ignoresSafeArea())
+            .background(GlassBackground())
             .navigationTitle(chat.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if let onClose {
+                    ToolbarItem(placement: .topBarLeading) {
+                        CloseButton(size: 32, action: onClose)
+                    }
+                }
                 // Streak lives in the nav bar so the thread stays clean.
                 ToolbarItem(placement: .topBarTrailing) {
                     if chat.streak > 0 {
                         Text("🔥 \(chat.streak)")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(Theme.gold)
                     }
                 }
             }
@@ -153,31 +188,45 @@ struct MessageBubble: View {
                 if let spotName = message.sharedSpotName {
                     HStack(spacing: 6) {
                         Image(systemName: "mappin.circle.fill")
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(Theme.gold)
                         Text(spotName)
                             .font(.subheadline.weight(.semibold))
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surfaceLight))
+                    .background { GlassCard(cornerRadius: 12) { Color.clear } }
                 }
                 if !message.text.isEmpty {
                     Text(message.text)
                         .font(.subheadline)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(isMine ? Theme.accent : Theme.surfaceLight)
-                        )
+                        // Mine in gold metal, theirs in glass — the thread reads
+                        // as two voices without a second accent colour.
+                        .background {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(isMine ? AnyShapeStyle(Theme.goldSheen)
+                                             : AnyShapeStyle(Material.ultraThinMaterial))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .strokeBorder(isMine ? Color.clear : Theme.glassRimTop.opacity(0.3),
+                                                      lineWidth: 1)
+                                }
+                                .shadow(color: isMine ? Theme.goldGlow.opacity(0.28) : .black.opacity(0.3),
+                                        radius: 8, y: 3)
+                        }
                         .foregroundStyle(isMine ? .black : Theme.textPrimary)
-                        // iMessage-style tapback badge.
+                        // iMessage-style tapback badge, on neutral glass so it
+                        // never competes with the gold bubble beneath it.
                         .overlay(alignment: isMine ? .topLeading : .topTrailing) {
                             if let tapback = message.tapback {
                                 Text(tapback)
                                     .font(.caption)
                                     .padding(5)
-                                    .background(Circle().fill(Theme.surface))
+                                    .background {
+                                        Circle().fill(.ultraThinMaterial)
+                                            .overlay { Circle().strokeBorder(Theme.glassRimTop.opacity(0.4), lineWidth: 1) }
+                                    }
                                     .offset(x: isMine ? -10 : 10, y: -12)
                             }
                         }

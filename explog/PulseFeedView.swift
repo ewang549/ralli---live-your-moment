@@ -16,6 +16,8 @@ struct PulseFeedView: View {
     @Query private var friends: [Friend]
     @Query private var allClips: [Clip]
 
+    @Environment(\.dismiss) private var dismiss
+
     /// One shared timestamp drives every card on screen.
     @State private var hourState = HourFeedState()
     @State private var openedChat: Chat?
@@ -40,7 +42,7 @@ struct PulseFeedView: View {
                 hourBadge
                 feed
             }
-            .background(Theme.background)
+            .background(GlassBackground())
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Chat.self) { chat in
                 ChatDetailView(chat: chat)
@@ -263,6 +265,8 @@ struct PulseFeedView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            // The hourly wall is presented modally, so it carries its own ✕.
+            CloseButton(size: 38) { dismiss() }
             // Calendar → the user's own stitched day (same destination as swipe-right).
             circleButton(icon: "calendar") { showVlog = true }
 
@@ -282,7 +286,7 @@ struct PulseFeedView: View {
                 }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 9)
-                .background(Capsule().fill(Theme.surface))
+                .background(Capsule().fill(Theme.baseElevated))
             }
             .buttonStyle(.plain)
 
@@ -302,7 +306,7 @@ struct PulseFeedView: View {
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(Theme.textPrimary)
                 .frame(width: 38, height: 38)
-                .background(Circle().fill(Theme.surface))
+                .background(Circle().fill(Theme.baseElevated))
         }
         .buttonStyle(.plain)
     }
@@ -312,7 +316,7 @@ struct PulseFeedView: View {
         HStack(spacing: 8) {
             Image(systemName: "clock.fill")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Theme.accent)
+                .foregroundStyle(Theme.gold)
             Text(hourState.hourLabel)
                 .font(.system(size: 15, weight: .heavy, design: .rounded).monospacedDigit())
                 .foregroundStyle(Theme.textPrimary)
@@ -324,13 +328,13 @@ struct PulseFeedView: View {
             if !hourState.isAtCurrentHour {
                 Button("now") { withAnimation(.easeInOut(duration: 0.2)) { hourState.resetToNow() } }
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(Theme.accent)
+                    .foregroundStyle(Theme.gold)
                     .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
-        .background(Capsule().fill(Theme.surface.opacity(0.9)))
+        .background(Capsule().fill(Theme.baseElevated.opacity(0.9)))
         .overlay(Capsule().stroke(.white.opacity(0.06), lineWidth: 1))
         .padding(.bottom, 8)
     }
@@ -393,7 +397,7 @@ private struct PulseCard: View {
         } else {
             // "Nothing logged this hour" — still a card, so the wall stays legible.
             ZStack {
-                Theme.surface
+                Theme.baseElevated
                 VStack(spacing: 6) {
                     Text(entry.friend.emoji).font(.system(size: 34)).opacity(0.5)
                     Text("no log at \(hourState.hourLabel)")
@@ -456,7 +460,7 @@ private struct PulseCard: View {
                 VStack(spacing: 16) {
                     railButton("sparkles") { if let chat = entry.chat { onOpen(chat) } }
                     railButton("arrowshape.turn.up.left.fill") { if let chat = entry.chat { onReply(chat) } }
-                    railButton(isLiked ? "heart.fill" : "heart", tint: isLiked ? Theme.accent : .white) {
+                    railButton(isLiked ? "heart.fill" : "heart", tint: isLiked ? Theme.gold : .white) {
                         toggleLike()
                     }
                 }
@@ -511,7 +515,7 @@ private struct ChatListSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
             }
-            .background(Theme.background.ignoresSafeArea())
+            .background(GlassBackground())
             .navigationTitle("Chats")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -560,14 +564,14 @@ private struct ChatRow: View {
                         Text("🔥")
                         Text("\(chat.streak)")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(Theme.gold)
                     }
                 }
                 CooldownLabel(chat: chat)
             }
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 18).fill(Theme.surface))
+        .background(RoundedRectangle(cornerRadius: 18).fill(Theme.baseElevated))
         .contentShape(RoundedRectangle(cornerRadius: 18))
     }
 

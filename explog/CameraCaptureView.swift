@@ -26,7 +26,7 @@ struct CameraCaptureView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Theme.base.ignoresSafeArea()
 
             if camera.hasCamera {
                 CameraPreview(session: camera.session)
@@ -73,12 +73,14 @@ struct CameraCaptureView: View {
                 }
 
                 // Video label reflects the context cap (2s pulse / 5s place).
-                Picker("Mode", selection: $mode) {
-                    Text(context.videoModeLabel).tag(CaptureMode.video)
-                    Text("Photo").tag(CaptureMode.photo)
+                HStack(spacing: 8) {
+                    FilterChip(title: context.videoModeLabel, isActive: mode == .video) {
+                        withAnimation(.easeOut(duration: 0.18)) { mode = .video }
+                    }
+                    FilterChip(title: "Photo", isActive: mode == .photo) {
+                        withAnimation(.easeOut(duration: 0.18)) { mode = .photo }
+                    }
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
                 .padding(.bottom, 18)
 
                 RecordButton(mode: mode, maxDuration: maxDuration, isRecording: camera.isRecording) {
@@ -137,17 +139,20 @@ private struct RecordButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
+                // Unlit track, then the gold progress arc over it.
                 Circle()
-                    .stroke(.white.opacity(0.6), lineWidth: 5)
+                    .stroke(Theme.gold.opacity(0.28), lineWidth: 5)
                     .frame(width: 78, height: 78)
                 Circle()
                     .trim(from: 0, to: progress)
-                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                    .stroke(Theme.gold, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                     .frame(width: 78, height: 78)
                     .rotationEffect(.degrees(-90))
+                    .shadow(color: Theme.goldGlow.opacity(0.7), radius: 8)
                 Circle()
-                    .fill(isRecording ? Theme.accent : .white)
+                    .fill(Theme.goldSheen)
                     .frame(width: isRecording ? 34 : 62, height: isRecording ? 34 : 62)
+                    .shadow(color: Theme.goldGlow.opacity(0.55), radius: 16)
                     .animation(.spring(duration: 0.25), value: isRecording)
             }
         }

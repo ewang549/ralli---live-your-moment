@@ -314,6 +314,9 @@ final class SpotClip {
     // Reels-feed engagement state.
     var likeCount: Int = 0
     var likedByMe: Bool = false
+    /// Bookmarked from the Places rail. Defaulted, so this is a lightweight
+    /// SwiftData migration for stores written before the rail existed.
+    var savedByMe: Bool = false
     var comments: [ClipComment] = []
 
     init(spot: Spot?, authorName: String, label: String, emoji: String,

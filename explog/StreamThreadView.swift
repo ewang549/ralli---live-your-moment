@@ -4,6 +4,11 @@ import StreamChatSwiftUI
 
 // Minimum custom factory (required members per SDK: `styles` has no default).
 // Central place for future ViewFactory customizations.
+//
+// The "Explog" prefix is deliberate: the Ralli rebrand is user-facing only.
+// Internal identifiers keep the old name so the bundle id, the Firebase
+// project (explog-723b7), the Cloud Function names, and the Stream app all
+// keep resolving. Rename these and the backend stops answering.
 final class ExplogViewFactory: ViewFactory {
     @Injected(\.chatClient) var chatClient
     var styles = RegularStyles()

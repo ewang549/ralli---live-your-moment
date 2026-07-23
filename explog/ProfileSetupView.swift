@@ -93,11 +93,11 @@ struct ProfileSetupView: View {
 
     private var header: some View {
         VStack(spacing: 10) {
-            ExplogWordmark(size: 38)
+            RalliWordmark(size: 38)
             Text("Pick your handle")
                 .font(.system(size: 21, weight: .semibold, design: .rounded))
                 .foregroundStyle(Theme.textPrimary)
-            Text("One name, everywhere on Explog.")
+            Text("One name, everywhere on Ralli.")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
         }

@@ -3,6 +3,11 @@ import Foundation
 /// Stream Chat credentials. The API key is safe to ship; the API SECRET must
 /// never appear anywhere in this app — tokens are minted server-side / via the
 /// Stream CLI (`getstream token <user>`).
+///
+/// Note on naming: the app is Ralli, but the type name, the module folder, the
+/// bundle id (`com.ej.explog`), the Firebase project (`explog-723b7`) and the
+/// `EXPLOG_AUTO_*` CLI hooks all still say "explog" on purpose. The rebrand is
+/// cosmetic — these are the keys the backend and the screenshot scripts match on.
 enum StreamConfig {
     static let apiKey = "msdyxmxmqf53"
 

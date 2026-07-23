@@ -29,36 +29,50 @@ struct BeaconsFeedView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        ZStack {
+            GlassBackground()
 
-            // Friends ↔ Public segmented control.
-            Picker("Feed", selection: $segment) {
-                ForEach(Segment.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 10)
+            VStack(spacing: 0) {
+                header
 
-            ScrollView {
-                LazyVStack(spacing: 14) {
-                    ForEach(filtered, id: \.id) { beacon in
-                        BeaconFeedCard(beacon: beacon)
-                    }
-                    if filtered.isEmpty {
-                        VStack(spacing: 8) {
-                            Text("📡").font(.system(size: 50))
-                            Text(segment == .friends
-                                 ? "No friend beacons right now"
-                                 : "No public activities nearby yet")
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.textSecondary)
+                // Friends ↔ Public, as gold filter chips rather than a system
+                // segmented control, which can't be tinted to match the rest.
+                HStack(spacing: 8) {
+                    ForEach(Segment.allCases, id: \.self) { option in
+                        FilterChip(title: option.rawValue,
+                                   count: beacons.filter {
+                                       option == .publicFeed ? $0.isPublic : !$0.isPublic
+                                   }.count,
+                                   isActive: segment == option) {
+                            withAnimation(.easeOut(duration: 0.18)) { segment = option }
                         }
-                        .padding(.top, 60)
                     }
+                    Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 100)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(filtered, id: \.id) { beacon in
+                            BeaconFeedCard(beacon: beacon)
+                        }
+                        if filtered.isEmpty {
+                            VStack(spacing: 8) {
+                                Text("📡").font(.system(size: 50))
+                                Text(segment == .friends
+                                     ? "No friend beacons right now"
+                                     : "No public activities nearby yet")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                            .padding(.top, 60)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 118)
+                }
+                .scrollIndicators(.hidden)
             }
         }
         .sheet(isPresented: $showMyActivities) {
@@ -91,37 +105,23 @@ struct BeaconsFeedView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text("Beacons")
                 .font(.system(size: 28, weight: .heavy, design: .rounded))
                 .foregroundStyle(Theme.textPrimary)
             Spacer()
-            // NEW: "My joined activities" shortcut.
-            Button {
+            // "My joined activities" shortcut.
+            GlassCircleButton(icon: "ticket.fill", label: "My joined activities") {
                 showMyActivities = true
-            } label: {
-                Image(systemName: "ticket.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .padding(9)
-                    .background(Circle().fill(Theme.surface))
             }
-            .accessibilityLabel("My joined activities")
-            // NEW: create a public activity (privacy-guarded).
-            Button {
+            // Create a public activity (privacy-guarded) — the primary action.
+            GlassCircleButton(icon: "plus", label: "Create an activity", isGold: true) {
                 if me?.isPrivate == true {
                     showPrivacyAlert = true
                 } else {
                     showCreate = true
                 }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(.black)
-                    .padding(9)
-                    .background(Circle().fill(Theme.accent))
             }
-            .accessibilityLabel("Create an activity")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -149,7 +149,8 @@ struct BeaconFeedCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 if let host = beacon.host {
-                    AvatarView(friend: host, size: 38)
+                    // Gold ring on the host's orb — they're the live signal here.
+                    GlassOrbAvatar(friend: host, size: 40, isActive: true)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(host.name)
                             .font(.subheadline.weight(.bold))
@@ -160,12 +161,13 @@ struct BeaconFeedCard: View {
                     }
                 } else {
                     ZStack {
-                        Circle().fill(Theme.surfaceLight)
+                        Circle().fill(.ultraThinMaterial)
+                            .overlay { Circle().strokeBorder(Theme.gold.opacity(0.35), lineWidth: 1) }
                         Image(systemName: "person.3.fill")
                             .font(.caption)
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(Theme.gold)
                     }
-                    .frame(width: 38, height: 38)
+                    .frame(width: 40, height: 40)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Community event")
                             .font(.subheadline.weight(.bold))
@@ -176,9 +178,12 @@ struct BeaconFeedCard: View {
                     }
                 }
                 Spacer()
-                Text(beacon.startsAt, style: .relative)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
+                HStack(spacing: 5) {
+                    GlowDot(size: 7, breathing: true)
+                    Text(beacon.startsAt, style: .relative)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.gold)
+                }
             }
 
             if let spot = beacon.spot {
@@ -203,36 +208,26 @@ struct BeaconFeedCard: View {
                 .foregroundStyle(Theme.textPrimary.opacity(0.9))
 
             HStack(spacing: 10) {
-                Text("\(beacon.joined.count)/\(beacon.capacity) going")
-                    .font(.caption.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(Theme.textSecondary)
-                Spacer()
-                // NEW: "More Details" opens the activity detail sheet.
-                Button {
+                capacityMeter
+                Spacer(minLength: 4)
+                // "More Details" opens the activity detail sheet.
+                GoldChip(title: "Details", systemImage: "info.circle") {
                     showDetail = true
-                } label: {
-                    Text("More Details")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.accent)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(Theme.accent.opacity(0.15)))
                 }
-                Button {
+                // Filled gold once you're in — RSVP state reads at a glance.
+                GoldChip(title: joined ? "Going" : (beacon.isFull ? "Full" : "Join"),
+                         systemImage: joined ? "checkmark" : nil,
+                         isFilled: joined) {
                     attemptJoin()
-                } label: {
-                    Text(joined ? "Going ✓" : "Join")
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(joined ? Theme.accent : .black)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(joined ? Theme.accent.opacity(0.2) : Theme.accent))
                 }
                 .disabled(!joined && beacon.isFull)
+                .opacity(!joined && beacon.isFull ? 0.45 : 1)
             }
         }
         .padding(16)
-        .background(RoundedRectangle(cornerRadius: 20).fill(Theme.surface))
+        .background {
+            GlassCard(cornerRadius: 20) { Color.clear }
+        }
         .sheet(isPresented: $showDetail) {
             ActivityDetailSheet(beacon: beacon)
         }
@@ -242,6 +237,33 @@ struct BeaconFeedCard: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("You must set your profile to Public to create or join community activities.")
+        }
+    }
+
+    /// Who's in, and how close to full: attendee orbs plus a gold fill bar that
+    /// runs hot as the last spots go.
+    private var capacityMeter: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: -8) {
+                ForEach(beacon.attendees.prefix(4), id: \.id) { friend in
+                    GlassOrbAvatar(friend: friend, size: 24)
+                }
+                Text("\(beacon.joined.count)/\(beacon.capacity)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(beacon.isFull ? Theme.gold : Theme.textSecondary)
+                    .padding(.leading, 14)
+            }
+            GeometryReader { proxy in
+                let fraction = min(1, Double(beacon.joined.count) / Double(max(beacon.capacity, 1)))
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.textPrimary.opacity(0.12))
+                    Capsule()
+                        .fill(Theme.goldSheen)
+                        .frame(width: proxy.size.width * fraction)
+                        .shadow(color: Theme.goldGlow.opacity(0.5), radius: 5)
+                }
+            }
+            .frame(width: 96, height: 3)
         }
     }
 
@@ -299,7 +321,7 @@ struct ActivityDetailSheet: View {
                                     .foregroundStyle(Theme.textPrimary)
                                 Text("\(spot.distanceMiles, specifier: "%.1f") mi from you")
                                     .font(.caption)
-                                    .foregroundStyle(Theme.accent)
+                                    .foregroundStyle(Theme.gold)
                             }
                         }
                         if !spot.address.isEmpty {
@@ -313,14 +335,14 @@ struct ActivityDetailSheet: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Label("About this spot", systemImage: "sparkles")
                                 .font(.subheadline.weight(.bold))
-                                .foregroundStyle(Theme.accent)
+                                .foregroundStyle(Theme.gold)
                             Text(spot.aiInsight)
                                 .font(.subheadline)
                                 .foregroundStyle(Theme.textPrimary.opacity(0.85))
                         }
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.surfaceLight))
+                        .background { GlassCard(cornerRadius: 16) { Color.clear } }
                     }
 
                     // Attendee roster — tap a card for their public profile sheet.
@@ -334,14 +356,14 @@ struct ActivityDetailSheet: View {
                                     profileFriend = friend
                                 } label: {
                                     VStack(spacing: 5) {
-                                        AvatarView(friend: friend, size: 52)
+                                        GlassOrbAvatar(friend: friend, size: 52, isActive: friend.id == beacon.host?.id)
                                         Text(friend.name)
                                             .font(.caption.weight(.semibold))
                                             .foregroundStyle(Theme.textPrimary)
                                         if friend.id == beacon.host?.id {
                                             Text("host")
                                                 .font(.system(size: 9, weight: .bold))
-                                                .foregroundStyle(Theme.accent)
+                                                .foregroundStyle(Theme.gold)
                                         }
                                     }
                                 }
@@ -363,7 +385,7 @@ struct ActivityDetailSheet: View {
                             .foregroundStyle(.black)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(Capsule().fill(Theme.accent))
+                            .background(Capsule().fill(Theme.gold))
                     }
                     .padding(.top, 6)
 
@@ -374,16 +396,16 @@ struct ActivityDetailSheet: View {
                         } label: {
                             Label("Message \(host.name) directly", systemImage: "bubble.left.fill")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Theme.accent)
+                                .foregroundStyle(Theme.gold)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 11)
-                                .background(Capsule().fill(Theme.accent.opacity(0.15)))
+                                .background(Capsule().fill(Theme.gold.opacity(0.15)))
                         }
                     }
                 }
                 .padding(20)
             }
-            .background(Theme.background.ignoresSafeArea())
+            .background(GlassBackground())
             .navigationTitle("Activity")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -478,7 +500,7 @@ struct ActivityChatView: View {
                     localThread
                 }
             }
-            .background(Theme.background.ignoresSafeArea())
+            .background(GlassBackground())
             .navigationTitle(beacon.spot?.name ?? "Activity chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -528,13 +550,13 @@ struct ActivityChatView: View {
                         .disabled(!canPost)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
-                        .background(Capsule().fill(Theme.surfaceLight))
+                        .background(Capsule().fill(Theme.baseRaised))
                         .foregroundStyle(Theme.textPrimary)
                         .onSubmit(send)
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 30))
-                            .foregroundStyle(draft.isEmpty || !canPost ? Theme.textSecondary : Theme.accent)
+                            .foregroundStyle(draft.isEmpty || !canPost ? Theme.textSecondary : Theme.gold)
                     }
                     .disabled(draft.isEmpty || !canPost)
                 }
@@ -608,10 +630,10 @@ struct MyActivitiesSheet: View {
                                 Spacer()
                                 Text("\(beacon.joined.count)/\(beacon.capacity)")
                                     .font(.caption.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(Theme.accent)
+                                    .foregroundStyle(Theme.gold)
                             }
                             .padding(12)
-                            .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surfaceLight))
+                            .background { GlassCard(cornerRadius: 14) { Color.clear } }
                         }
                     }
                 }
@@ -620,7 +642,7 @@ struct MyActivitiesSheet: View {
         }
         .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
@@ -659,11 +681,11 @@ struct NewActivitySheet: View {
                     TextField("What's the plan?", text: $note, axis: .vertical)
                     Stepper("Capacity: \(capacity)", value: $capacity, in: 2...50)
                     Toggle("Public activity", isOn: $isPublic)
-                        .tint(Theme.accent)
+                        .tint(Theme.gold)
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Theme.background)
+            .background(GlassBackground())
             .navigationTitle("New beacon")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

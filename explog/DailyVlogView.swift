@@ -36,7 +36,7 @@ struct DailyVlogView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Theme.base.ignoresSafeArea()
 
             // Horizontal paging = day scrubbing. Each page owns its own player.
             TabView(selection: $selectedDay) {
@@ -56,15 +56,7 @@ struct DailyVlogView: View {
     private var header: some View {
         VStack(spacing: 10) {
             HStack {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(10)
-                        .background(Circle().fill(.black.opacity(0.4)))
-                }
+                CloseButton(overMedia: true) { dismiss() }
 
                 Spacer()
 
@@ -169,7 +161,7 @@ private struct DayRecapPage: View {
                 HStack(spacing: 4) {
                     ForEach(clips.indices, id: \.self) { index in
                         Capsule()
-                            .fill(index <= fallbackIndex ? Theme.accent : .white.opacity(0.3))
+                            .fill(index <= fallbackIndex ? Theme.gold : .white.opacity(0.3))
                             .frame(height: 3)
                     }
                 }
@@ -200,7 +192,7 @@ private struct DayRecapPage: View {
             Spacer()
             HStack(spacing: 10) {
                 Image(systemName: "film.stack")
-                    .foregroundStyle(Theme.accent)
+                    .foregroundStyle(Theme.gold)
                 Text("\(clips.count) clip\(clips.count == 1 ? "" : "s") · \(totalSecondsLabel)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)

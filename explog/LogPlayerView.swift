@@ -32,7 +32,7 @@ struct LogPlayerView: View {
             .scrollPosition(id: $visibleChatID)
         }
         .ignoresSafeArea()
-        .background(Color.black.ignoresSafeArea())
+        .background(Theme.base.ignoresSafeArea())
         .overlay(alignment: .topTrailing) {
             Button {
                 dismiss()
@@ -177,7 +177,7 @@ private struct LogOverlay: View {
                 if chat.streak > 0 {
                     Text("🔥 \(chat.streak)")
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(Theme.gold)
                 }
             }
             if clipIndex == 0 && clipCount > 1 {
@@ -227,7 +227,7 @@ struct ReactionRail: View {
             } label: {
                 Image(systemName: myReactionCount > 0 ? "heart.fill" : "heart")
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(myReactionCount > 0 ? Theme.accent : .white)
+                    .foregroundStyle(myReactionCount > 0 ? Theme.gold : .white)
                     .shadow(radius: 4)
             }
             .simultaneousGesture(
@@ -318,7 +318,7 @@ private struct GroupLogPage: View {
                 HStack(spacing: 4) {
                     ForEach(0..<latestPerMember.count, id: \.self) { index in
                         Capsule()
-                            .fill(index <= reelIndex ? Theme.accent : .white.opacity(0.3))
+                            .fill(index <= reelIndex ? Theme.gold : .white.opacity(0.3))
                             .frame(height: 3)
                     }
                 }
@@ -329,7 +329,7 @@ private struct GroupLogPage: View {
                     .foregroundStyle(.white)
                 Text("🔥 \(chat.streak)")
                     .font(.subheadline.weight(.bold))
-                    .foregroundStyle(Theme.accent)
+                    .foregroundStyle(Theme.gold)
                 Spacer()
                 Picker("Mode", selection: $mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }

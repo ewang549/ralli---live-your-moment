@@ -19,6 +19,14 @@ struct UserProfileView: View {
     @State private var recoveryError: String?
 
     var body: some View {
+        ZStack {
+            GlassBackground()
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if let me {
             profileForm(for: me)
         } else {
@@ -101,28 +109,40 @@ struct UserProfileView: View {
         @Bindable var profile = me
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Profile")
-                    .font(.system(size: 28, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Theme.textPrimary)
-                    .padding(.top, 12)
+                HStack {
+                    Text("Profile")
+                        .font(.system(size: 28, weight: .heavy, design: .rounded))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    RalliWordmark(size: 22)
+                }
+                .padding(.top, 12)
 
                 // Profile picture (emoji avatar) with picker.
                 HStack(spacing: 16) {
-                    AvatarView(friend: me, size: 76)
+                    GlassOrbAvatar(friend: me, size: 76, isActive: true)
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(avatarOptions, id: \.self) { option in
+                                let isOn = me.emoji == option
                                 Button {
                                     profile.emoji = option
                                 } label: {
                                     Text(option)
                                         .font(.system(size: 24))
                                         .padding(7)
-                                        .background(
-                                            Circle().fill(me.emoji == option
-                                                          ? Theme.accent.opacity(0.35)
-                                                          : Theme.surfaceLight)
-                                        )
+                                        .background {
+                                            Circle()
+                                                .fill(.ultraThinMaterial)
+                                                .overlay {
+                                                    Circle().strokeBorder(
+                                                        isOn ? AnyShapeStyle(Theme.goldRim)
+                                                             : AnyShapeStyle(Theme.glassRimTop.opacity(0.3)),
+                                                        lineWidth: isOn ? 1.5 : 1)
+                                                }
+                                                .shadow(color: isOn ? Theme.goldGlow.opacity(0.5) : .clear,
+                                                        radius: 8)
+                                        }
                                 }
                             }
                         }
@@ -144,17 +164,19 @@ struct UserProfileView: View {
                                 .foregroundStyle(Theme.textSecondary)
                         }
                     }
-                    .tint(Theme.accent)
+                    .tint(Theme.gold)
                 }
                 .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(Theme.surface)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .strokeBorder(me.isPrivate ? Color.clear : Theme.accent.opacity(0.35), lineWidth: 1)
-                        )
-                )
+                .background {
+                    GlassCard(cornerRadius: 16) { Color.clear }
+                        // Public profiles carry a gold edge — the setting is
+                        // legible without reading the label.
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(me.isPrivate ? Color.clear : Theme.gold.opacity(0.4),
+                                              lineWidth: 1)
+                        }
+                }
 
                 // Primary metadata fields.
                 VStack(spacing: 10) {
@@ -174,7 +196,7 @@ struct UserProfileView: View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+                    .background { GlassCard(cornerRadius: 12) { Color.clear } }
                 }
 
                 // Bio.
@@ -185,7 +207,7 @@ struct UserProfileView: View {
                     TextField("Say something about yourself…", text: $profile.bio, axis: .vertical)
                         .lineLimit(2...4)
                         .padding(12)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+                        .background { GlassCard(cornerRadius: 12) { Color.clear } }
                         .foregroundStyle(Theme.textPrimary)
                 }
 
@@ -216,7 +238,7 @@ struct UserProfileView: View {
                             }
                         }
                         .padding(14)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+                        .background { GlassCard(cornerRadius: 12) { Color.clear } }
                     }
                     .padding(.top, 6)
                 }
@@ -263,7 +285,7 @@ struct UserProfileView: View {
                 .disabled(!demoLoaded)
             }
             .padding(14)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+            .background { GlassCard(cornerRadius: 12) { Color.clear } }
         }
         .padding(.top, 6)
     }
@@ -309,7 +331,7 @@ struct UserProfileView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+        .background { GlassCard(cornerRadius: 12) { Color.clear } }
     }
 }
 
@@ -336,7 +358,12 @@ struct FlowChips: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
                         .frame(maxWidth: .infinity)
-                        .background(Capsule().fill(isOn ? Theme.accent : Theme.surfaceLight))
+                        .background {
+                            Capsule()
+                                .fill(isOn ? AnyShapeStyle(Theme.goldSheen) : AnyShapeStyle(Material.ultraThinMaterial))
+                                .overlay { Capsule().strokeBorder(Theme.glassRimTop.opacity(isOn ? 0 : 0.35), lineWidth: 1) }
+                                .shadow(color: isOn ? Theme.goldGlow.opacity(0.4) : .clear, radius: 8)
+                        }
                 }
             }
         }
@@ -385,7 +412,7 @@ struct PublicProfileSheet: View {
                                 .font(.caption.weight(.semibold))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
-                                .background(Capsule().fill(Theme.surfaceLight))
+                                .background { Capsule().fill(.ultraThinMaterial).overlay { Capsule().strokeBorder(Theme.glassRimTop.opacity(0.3), lineWidth: 1) } }
                                 .foregroundStyle(Theme.textPrimary)
                         }
                     }
@@ -394,7 +421,7 @@ struct PublicProfileSheet: View {
             Spacer()
         }
         .frame(maxWidth: .infinity)
-        .background(Theme.surface)
+        .background(GlassBackground())
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)

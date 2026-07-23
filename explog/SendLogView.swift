@@ -36,7 +36,7 @@ struct SendLogView: View {
                 TextField("What are you up to?", text: $label)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(Capsule().fill(Theme.surfaceLight))
+                    .background(Capsule().fill(Theme.baseRaised))
                     .foregroundStyle(Theme.textPrimary)
                     .padding(.horizontal, 20)
                     .padding(.top, 14)
@@ -49,7 +49,7 @@ struct SendLogView: View {
                             }
                         }
                     }
-                    .listRowBackground(Theme.surface)
+                    .listRowBackground(Theme.baseElevated)
                 }
                 .scrollContentBackground(.hidden)
 
@@ -61,13 +61,13 @@ struct SendLogView: View {
                         .foregroundStyle(.black)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
-                        .background(Capsule().fill(selected.isEmpty ? Theme.textSecondary : Theme.accent))
+                        .background(Capsule().fill(selected.isEmpty ? Theme.textSecondary : Theme.gold))
                 }
                 .disabled(selected.isEmpty)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 12)
             }
-            .background(Theme.background.ignoresSafeArea())
+            .background(GlassBackground())
             .navigationTitle("Send log")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -105,7 +105,7 @@ struct SendLogView: View {
                             .font(.system(size: 26))
                             .padding(8)
                             .background(
-                                Circle().fill(emoji == option ? Theme.accent.opacity(0.35) : Theme.surfaceLight)
+                                Circle().fill(emoji == option ? Theme.gold.opacity(0.35) : Theme.baseRaised)
                             )
                     }
                 }
@@ -167,7 +167,7 @@ private struct AudienceRow: View {
                         } else if chat.streak > 0 {
                             Text("🔥 \(chat.streak)")
                                 .font(.caption)
-                                .foregroundStyle(Theme.accent)
+                                .foregroundStyle(Theme.gold)
                         }
                     }
                     Spacer()
@@ -177,7 +177,7 @@ private struct AudienceRow: View {
                     } else {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                             .font(.title3)
-                            .foregroundStyle(isSelected ? Theme.accent : Theme.textSecondary)
+                            .foregroundStyle(isSelected ? Theme.gold : Theme.textSecondary)
                     }
                 }
             }

@@ -49,7 +49,7 @@ struct MainTabView: View {
 
             tabBar
         }
-        .background(Theme.background.ignoresSafeArea())
+        .background(GlassBackground())
         .preferredColorScheme(.dark)
         .environment(router)
         .fullScreenCover(isPresented: Bindable(router).showCapture) {
@@ -79,57 +79,89 @@ struct MainTabView: View {
         .onDisappear { orientation.stop() }
     }
 
+    /// A floating glass pill rather than a docked bar: it hovers over whatever
+    /// the tab is showing (including full-bleed media on Places), so the content
+    /// runs edge to edge and the nav refracts what's behind it.
     private var tabBar: some View {
-        HStack {
+        HStack(spacing: 0) {
             // Tab 1: Profile
             tabButton(icon: "person.crop.circle", title: "Profile", target: .profile)
             // Tab 2: Pulse
             tabButton(icon: "clock.fill", title: "Pulse", target: .pulse)
 
-            // Tab 3: Camera — center action button.
-            Button {
-                router.openCapture(router.contextForCurrentTab)
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(Theme.accent)
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Theme.accent.opacity(0.45), radius: 12, y: 4)
-                    Image(systemName: "camera.fill")
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.black)
-                }
-            }
-            .offset(y: -14)
-            .accessibilityLabel("Capture a log")
+            // Tab 3: Camera — center action, the one solid-metal element.
+            captureButton
 
             // Tab 4: Places
             tabButton(icon: "map.fill", title: "Places", target: .places)
             // Tab 5: Beacons
             tabButton(icon: "light.beacon.max.fill", title: "Beacons", target: .beacons)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
-        .background(
-            Rectangle()
+        .padding(.horizontal, 8)
+        .padding(.vertical, 9)
+        .background {
+            Capsule(style: .continuous)
                 .fill(.ultraThinMaterial)
-                .overlay(Theme.background.opacity(0.6))
-                .ignoresSafeArea(edges: .bottom)
-        )
+                .overlay {
+                    // Inner sheen — light gathers along the top of the pill.
+                    Capsule(style: .continuous).fill(
+                        LinearGradient(colors: [Theme.glassTint, .clear, .black.opacity(0.12)],
+                                       startPoint: .top, endPoint: .bottom)
+                    )
+                }
+                .overlay {
+                    Capsule(style: .continuous).strokeBorder(
+                        LinearGradient(colors: [Theme.glassRimTop, .white.opacity(0.05), Theme.glassRimBottom],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 1
+                    )
+                }
+                .shadow(color: .black.opacity(0.55), radius: 20, y: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 6)
+    }
+
+    private var captureButton: some View {
+        Button {
+            router.openCapture(router.contextForCurrentTab)
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Theme.goldSheen)
+                    .frame(width: 52, height: 52)
+                    .shadow(color: Theme.goldGlow.opacity(0.6), radius: 16, y: 3)
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.black)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Capture a log")
     }
 
     private func tabButton(icon: String, title: String, target: Tab) -> some View {
-        Button {
-            router.tab = target
+        let isActive = router.tab == target
+        return Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { router.tab = target }
         } label: {
             VStack(spacing: 3) {
-                Image(systemName: icon).font(.system(size: 20, weight: .semibold))
-                Text(title).font(.caption2.weight(.semibold))
+                Image(systemName: icon)
+                    .font(.system(size: 19, weight: .semibold))
+                    // Only the active tab is lit; the rest stay muted so the
+                    // gold never reads as five competing highlights.
+                    .foregroundStyle(isActive ? AnyShapeStyle(Theme.goldSheen)
+                                              : AnyShapeStyle(Theme.textSecondary))
+                    .shadow(color: isActive ? Theme.goldGlow.opacity(0.7) : .clear, radius: 10)
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(isActive ? Theme.gold : Theme.textSecondary.opacity(0.8))
             }
-            .foregroundStyle(router.tab == target ? Theme.accent : Theme.textSecondary)
             .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 }
 

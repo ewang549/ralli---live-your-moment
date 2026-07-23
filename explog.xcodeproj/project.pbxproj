@@ -428,9 +428,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Explog uses the camera to capture your 3-second logs.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Explog uses your location to show nearby experiences and beacons.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Explog records ambient sound with your video logs.";
+				INFOPLIST_KEY_CFBundleDisplayName = Ralli;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Ralli uses the camera to capture your 3-second logs.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Ralli uses your location to show nearby experiences and beacons.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Ralli records ambient sound with your video logs.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -474,9 +475,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Explog uses the camera to capture your 3-second logs.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Explog uses your location to show nearby experiences and beacons.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Explog records ambient sound with your video logs.";
+				INFOPLIST_KEY_CFBundleDisplayName = Ralli;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Ralli uses the camera to capture your 3-second logs.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Ralli uses your location to show nearby experiences and beacons.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Ralli records ambient sound with your video logs.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

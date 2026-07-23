@@ -53,28 +53,33 @@ struct StackedClipPane: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            GlassOrbAvatar(emoji: authorEmoji, hue: authorHue, size: 32)
+            // Gold ring marks the author who actually posted this slot.
+            GlassOrbAvatar(emoji: authorEmoji, hue: authorHue, size: 32,
+                           isActive: clip != nil)
             VStack(alignment: .leading, spacing: 1) {
                 if let authorName {
                     Text(authorName)
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Theme.textPrimary)
                         .shadow(color: .black.opacity(0.6), radius: 4)
                 }
                 if let roleLabel {
                     Text(roleLabel)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Theme.textSecondary)
                 }
             }
             Spacer()
             if let capturedAt = clip?.capturedAt {
                 Text(capturedAt.clockTime)
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 9)
+                    .foregroundStyle(Theme.gold)
+                    .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Capsule().fill(.black.opacity(0.35)))
+                    .background {
+                        Capsule().fill(.ultraThinMaterial)
+                            .overlay { Capsule().strokeBorder(Theme.gold.opacity(0.3), lineWidth: 1) }
+                    }
             }
         }
     }
@@ -94,7 +99,7 @@ struct StackedClipPane: View {
 
     private var noClipPlaceholder: some View {
         ZStack {
-            LinearGradient(colors: [Theme.surface, Theme.background],
+            LinearGradient(colors: [Theme.baseElevated, Theme.base],
                            startPoint: .top, endPoint: .bottom)
             VStack(spacing: 6) {
                 Text(authorEmoji).font(.system(size: 34)).opacity(0.5)
@@ -127,7 +132,7 @@ struct FriendPairFeedView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Theme.base.ignoresSafeArea()
 
             GeometryReader { proxy in
                 // Vertical paging over friends. `.scrollTargetBehavior(.paging)`
@@ -136,6 +141,11 @@ struct FriendPairFeedView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(friends.enumerated()), id: \.element.id) { index, friend in
                             pairPage(for: friend, height: proxy.size.height)
+                                .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
+                                    view
+                                        .opacity(phase.isIdentity ? 1 : 0.5)
+                                        .scaleEffect(phase.isIdentity ? 1 : 0.93)
+                                }
                                 .id(index)
                         }
                     }
@@ -155,6 +165,7 @@ struct FriendPairFeedView: View {
                     }
                 ))
             }
+            .ignoresSafeArea()
 
             timestampBanner
         }
@@ -180,7 +191,7 @@ struct FriendPairFeedView: View {
                 authorHue: me?.hue ?? 0.58,
                 roleLabel: "you",
                 // Clears the floating timestamp banner above it.
-                headerTopPadding: 44
+                headerTopPadding: 96
             )
             .frame(height: (height - 2) / 2)
 
@@ -200,13 +211,7 @@ struct FriendPairFeedView: View {
     /// Synchronized timestamp banner, pinned above both panes.
     private var timestampBanner: some View {
         HStack(spacing: 10) {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(.black.opacity(0.45)))
-            }
+            CloseButton(overMedia: true) { dismiss() }
 
             Spacer()
 
@@ -224,7 +229,7 @@ struct FriendPairFeedView: View {
             Spacer()
 
             // Balances the leading button.
-            Color.clear.frame(width: 34, height: 34)
+            Color.clear.frame(width: 38, height: 38)
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
@@ -233,14 +238,15 @@ struct FriendPairFeedView: View {
 
 // MARK: - B. Group chat video feed
 
-/// Every member's current 2-second clip in one long continuous scroll —
-/// deliberately *not* paged, so a group reads as a single column you can flick
-/// through end to end.
+/// Every member's current 2-second clip, one clip per full screen, paging
+/// vertically. One member fills the screen at a time — you never see the edge
+/// of the next or previous clip while at rest.
 struct GroupClipFeedView: View {
     let chat: Chat
 
     @Environment(\.dismiss) private var dismiss
     @State private var clock = ClipSyncClock()
+    @State private var currentIndex: Int = 0
 
     /// One clip per member, most recent first, skipping members with nothing.
     private var entries: [(friend: Friend, clip: Clip?)] {
@@ -252,30 +258,38 @@ struct GroupClipFeedView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Theme.base.ignoresSafeArea()
 
             GeometryReader { proxy in
-                // Continuous ScrollView, no paging behavior: panes are sized to
-                // a little over half the screen so the next one always peeks in
-                // and the column reads as continuous.
                 ScrollView(.vertical) {
-                    LazyVStack(spacing: 2) {
-                        ForEach(entries, id: \.friend.id) { entry in
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(entries.enumerated()), id: \.element.friend.id) { index, entry in
                             StackedClipPane(
                                 clip: entry.clip,
                                 authorName: entry.friend.name,
                                 authorEmoji: entry.friend.emoji,
                                 authorHue: entry.friend.hue,
-                                roleLabel: entry.friend.isMe ? "you" : nil
+                                roleLabel: entry.friend.isMe ? "you" : nil,
+                                // Clears the floating title bar above.
+                                headerTopPadding: 96
                             )
-                            .frame(height: proxy.size.height * 0.62)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
+                                view
+                                    .opacity(phase.isIdentity ? 1 : 0.5)
+                                    .scaleEffect(phase.isIdentity ? 1 : 0.93)
+                            }
+                            .id(index)
                         }
                     }
-                    .padding(.top, 54)
-                    .padding(.bottom, 30)
+                    .scrollTargetLayout()
                 }
+                // One clip per swipe, snapped — no peek at the neighbours.
+                .scrollTargetBehavior(.paging)
                 .scrollIndicators(.hidden)
+                .scrollPosition(id: syncedIndex)
             }
+            .ignoresSafeArea()
 
             header
         }
@@ -285,15 +299,21 @@ struct GroupClipFeedView: View {
         .preferredColorScheme(.dark)
     }
 
+    /// Restarts every clip together whenever a swipe lands on a new page.
+    private var syncedIndex: Binding<Int?> {
+        Binding(
+            get: { currentIndex },
+            set: { newValue in
+                guard let newValue, newValue != currentIndex else { return }
+                currentIndex = newValue
+                clock.resync()
+            }
+        )
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(.black.opacity(0.45)))
-            }
+            CloseButton(overMedia: true) { dismiss() }
             Spacer()
             VStack(spacing: 1) {
                 Text(chat.displayName)
@@ -304,7 +324,7 @@ struct GroupClipFeedView: View {
                     .foregroundStyle(.white.opacity(0.65))
             }
             Spacer()
-            Color.clear.frame(width: 34, height: 34)
+            Color.clear.frame(width: 38, height: 38)
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
@@ -313,13 +333,14 @@ struct GroupClipFeedView: View {
 
 // MARK: - C. All-friends continuous feed
 
-/// Every friend's current 2-second clip, end to end in one scroll. Same
-/// continuous mechanic as the group feed, but scoped to the whole roster.
+/// Every friend's current 2-second clip, one per full screen, paging vertically.
+/// Same full-screen paging mechanic as the group feed, scoped to the roster.
 struct AllFriendsFeedView: View {
     let friends: [Friend]
 
     @Environment(\.dismiss) private var dismiss
     @State private var clock = ClipSyncClock()
+    @State private var currentIndex: Int = 0
 
     private var entries: [Friend] {
         friends
@@ -329,42 +350,45 @@ struct AllFriendsFeedView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Theme.base.ignoresSafeArea()
 
             GeometryReader { proxy in
                 ScrollView(.vertical) {
-                    LazyVStack(spacing: 2) {
-                        ForEach(entries) { friend in
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, friend in
                             StackedClipPane(
                                 clip: friend.latestClip,
                                 authorName: friend.name,
                                 authorEmoji: friend.emoji,
                                 authorHue: friend.hue,
-                                roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId
+                                roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId,
+                                headerTopPadding: 96
                             )
-                            .frame(height: proxy.size.height * 0.62)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
+                                view
+                                    .opacity(phase.isIdentity ? 1 : 0.5)
+                                    .scaleEffect(phase.isIdentity ? 1 : 0.93)
+                            }
+                            .id(index)
                         }
                     }
-                    .padding(.top, 54)
-                    .padding(.bottom, 30)
+                    .scrollTargetLayout()
                 }
+                .scrollTargetBehavior(.paging)
                 .scrollIndicators(.hidden)
+                .scrollPosition(id: syncedIndex)
             }
+            .ignoresSafeArea()
 
             HStack(spacing: 10) {
-                Button { dismiss() } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(.black.opacity(0.45)))
-                }
+                CloseButton(overMedia: true) { dismiss() }
                 Spacer()
                 Text("All friends")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Spacer()
-                Color.clear.frame(width: 34, height: 34)
+                Color.clear.frame(width: 38, height: 38)
             }
             .padding(.horizontal, 14)
             .padding(.top, 8)
@@ -373,5 +397,17 @@ struct AllFriendsFeedView: View {
         .task { clock.start() }
         .onDisappear { clock.stop() }
         .preferredColorScheme(.dark)
+    }
+
+    /// Restarts every clip together whenever a swipe lands on a new page.
+    private var syncedIndex: Binding<Int?> {
+        Binding(
+            get: { currentIndex },
+            set: { newValue in
+                guard let newValue, newValue != currentIndex else { return }
+                currentIndex = newValue
+                clock.resync()
+            }
+        )
     }
 }

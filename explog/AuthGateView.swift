@@ -66,7 +66,7 @@ struct AuthGateView: View {
         ZStack {
             GlassBackground()
             VStack(spacing: 18) {
-                ExplogWordmark(size: 40)
+                RalliWordmark(size: 40)
                 ProgressView().tint(Theme.gold)
             }
         }
@@ -122,19 +122,20 @@ struct WelcomeView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            Text("Explog")
-                .font(.system(size: 44, weight: .heavy, design: .rounded))
-                .foregroundStyle(Theme.textPrimary)
+            RalliWordmark(size: 52)
             Text("Life, on the hour.")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
+                .padding(.top, 4)
                 .padding(.bottom, 28)
 
-            Picker("Mode", selection: $mode) {
-                ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            HStack(spacing: 8) {
+                ForEach(Mode.allCases, id: \.self) { option in
+                    FilterChip(title: option.rawValue, isActive: mode == option) {
+                        withAnimation(.easeOut(duration: 0.18)) { mode = option }
+                    }
+                }
             }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
             .padding(.bottom, 20)
 
             VStack(spacing: 12) {
@@ -151,7 +152,7 @@ struct WelcomeView: View {
                     .textContentType(mode == .signUp ? .newPassword : .password)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 13)
-                    .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surface))
+                    .background { GlassCard(cornerRadius: 14) { Color.clear } }
                     .foregroundStyle(Theme.textPrimary)
             }
             .padding(.horizontal, 28)
@@ -164,33 +165,30 @@ struct WelcomeView: View {
                     .padding(.horizontal, 28)
             }
 
-            Button(action: submit) {
-                Group {
-                    if busy {
-                        ProgressView().tint(.black)
-                    } else {
-                        Text(mode == .signUp ? "Create account" : "Log in")
-                            .font(.headline)
-                    }
-                }
-                .foregroundStyle(.black)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 15)
-                .background(Capsule().fill(canSubmit ? Theme.accent : Theme.textSecondary))
-            }
-            .disabled(!canSubmit || busy)
-            .padding(.horizontal, 28)
-            .padding(.top, 18)
+            GoldButton(title: mode == .signUp ? "Create account" : "Log in",
+                       busy: busy, enabled: canSubmit, action: submit)
+                .padding(.horizontal, 28)
+                .padding(.top, 18)
 
             Spacer()
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            LinearGradient(colors: [Theme.background, Color(red: 0.13, green: 0.07, blue: 0.05)],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-        )
+        // Onboarding has no content of its own, so the glass would sit on a
+        // flat void. A warm gold bloom behind the panes gives it something
+        // to refract.
+        .background {
+            ZStack {
+                Theme.appBackground
+                RadialGradient(colors: [Theme.goldGlow.opacity(0.18), .clear],
+                               center: .init(x: 0.5, y: 0.22),
+                               startRadius: 0, endRadius: 380)
+                RadialGradient(colors: [Theme.goldDeep.opacity(0.14), .clear],
+                               center: .init(x: 0.15, y: 0.85),
+                               startRadius: 0, endRadius: 300)
+            }
+            .ignoresSafeArea()
+        }
         .preferredColorScheme(.dark)
 #if DEBUG
         // CLI verification hook: SIMCTL_CHILD_EXPLOG_AUTO_AUTH="signup|login:email:password:Name"
@@ -215,7 +213,7 @@ struct WelcomeView: View {
         TextField(placeholder, text: text)
             .padding(.horizontal, 16)
             .padding(.vertical, 13)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surface))
+            .background { GlassCard(cornerRadius: 14) { Color.clear } }
             .foregroundStyle(Theme.textPrimary)
     }
 
@@ -256,7 +254,7 @@ struct WelcomeView: View {
         let credentials = try await StreamTokenProvider.fetchToken(for: firebaseUser)
         try await chatClient.connectUser(
             userInfo: .init(id: credentials.userId,
-                            name: firebaseUser.displayName ?? "Explog user"),
+                            name: firebaseUser.displayName ?? "Ralli user"),
             token: Token(rawValue: credentials.token)
         )
     }

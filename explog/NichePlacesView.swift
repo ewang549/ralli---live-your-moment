@@ -2,13 +2,29 @@ import SwiftUI
 import SwiftData
 
 // MARK: - View A: Niche Places feed
-// Reels-style full-screen vertical stream of place clips. Right edge carries the
-// interaction rail (like / comment / share), bottom overlay carries the location
-// caption which expands into the detail sheet.
+//
+// The gold showcase. A snapping full-screen vertical media feed: the clip is
+// the backdrop, edge to edge, and everything else floats over it as glass and
+// gold — the right-hand action rail, the orb avatar with its gold ring, the
+// follow chip, and the sequence scrubber marking your place in the spot's set.
 
 struct NichePlacesView: View {
     @Query(sort: \SpotClip.capturedAt, order: .reverse) private var clips: [SpotClip]
     @State private var visibleClipID: UUID?
+
+    /// Where the visible clip sits inside its own spot's set — what the scrubber
+    /// is counting. Falls back to the whole feed when a clip has no spot.
+    private var sequence: (index: Int, count: Int) {
+        guard let visibleClipID, let clip = clips.first(where: { $0.id == visibleClipID })
+        else { return (0, max(clips.count, 1)) }
+        let set = (clip.spot?.perspectives ?? [])
+            .sorted { $0.capturedAt > $1.capturedAt }
+        guard let position = set.firstIndex(where: { $0.id == clip.id }) else {
+            let feedIndex = clips.firstIndex(where: { $0.id == clip.id }) ?? 0
+            return (feedIndex, clips.count)
+        }
+        return (position, set.count)
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -17,17 +33,63 @@ struct NichePlacesView: View {
                     ForEach(clips) { clip in
                         PlacePage(clip: clip, isActive: visibleClipID == clip.id)
                             .frame(width: proxy.size.width, height: proxy.size.height)
+                            // The current clip is full and sharp; the one being
+                            // swiped away eases back and dims, so the page change
+                            // reads as a smooth settle rather than a hard cut.
+                            .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
+                                view
+                                    .opacity(phase.isIdentity ? 1 : 0.5)
+                                    .scaleEffect(phase.isIdentity ? 1 : 0.92)
+                            }
                             .id(clip.id)
                     }
                 }
                 .scrollTargetLayout()
             }
+            // One item per swipe — the feed always settles on a whole clip.
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: $visibleClipID)
+            .scrollIndicators(.hidden)
+            .overlay(alignment: .top) { topChrome }
         }
         .ignoresSafeArea()
-        .background(Color.black.ignoresSafeArea())
+        .background(GlassBackground())
         .onAppear { if visibleClipID == nil { visibleClipID = clips.first?.id } }
+    }
+
+    /// Floating header: the wordmark plus the sequence scrubber, over a scrim
+    /// short enough that the media still runs to the top edge.
+    private var topChrome: some View {
+        VStack(spacing: 10) {
+            HStack {
+                RalliWordmark(size: 24)
+                Spacer()
+                HStack(spacing: 6) {
+                    GlowDot(size: 7, breathing: true)
+                    Text("NEARBY NOW")
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .kerning(1.1)
+                        .foregroundStyle(Theme.textPrimary.opacity(0.85))
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
+                .background {
+                    Capsule().fill(.ultraThinMaterial)
+                        .overlay { Capsule().strokeBorder(Theme.gold.opacity(0.35), lineWidth: 1) }
+                }
+            }
+
+            SequenceScrubber(count: sequence.count, index: sequence.index)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 60)
+        .padding(.bottom, 14)
+        .background {
+            LinearGradient(colors: [.black.opacity(0.55), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -39,108 +101,141 @@ private struct PlacePage: View {
     @State private var showComments = false
     @State private var showShare = false
     @State private var showDetail = false
+    @State private var captionExpanded = false
+    @State private var isFollowing = false
+
+    /// Handle derived from the author's display name — the seeded feed has no
+    /// real accounts behind it, so this is presentation only.
+    private var handle: String {
+        "@" + clip.authorName.lowercased()
+            .replacingOccurrences(of: " ", with: "_")
+    }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottom) {
+            // The media is the backdrop; every control below floats over it.
             VibeClipView(emoji: clip.emoji, label: clip.label,
                          hueA: clip.hueA, hueB: clip.hueB, animate: isActive)
                 .ignoresSafeArea()
 
-            // Right-edge interaction rail (like / comment / share).
-            VStack(spacing: 22) {
-                Spacer()
-                railButton(icon: clip.likedByMe ? "heart.fill" : "heart",
-                           tint: clip.likedByMe ? Theme.accent : .white,
-                           count: clip.likeCount) {
-                    toggleLike()
-                }
-                railButton(icon: "bubble.right.fill", tint: .white, count: clip.comments.count) {
-                    showComments = true
-                }
-                railButton(icon: "paperplane.fill", tint: .white, count: nil) {
-                    showShare = true
-                }
-                Spacer().frame(height: 140)
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.trailing, 14)
+            // Keeps the glass and the caption legible over bright footage.
+            LinearGradient(colors: [.clear, .black.opacity(0.25), .black.opacity(0.72)],
+                           startPoint: .center, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
 
-            // Bottom caption: location, distance, summary → tap expands detail sheet.
-            VStack {
-                Spacer()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("\(clip.authorName) · \(clip.capturedAt.relativeHour)")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.8))
-                    Text(clip.label)
-                        .font(.subheadline)
-                        .foregroundStyle(.white)
-                    if let spot = clip.spot {
-                        Button {
-                            showDetail = true
-                        } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "mappin.circle.fill")
-                                        .foregroundStyle(Theme.accent)
-                                    Text(spot.name)
-                                        .font(.headline)
-                                        .foregroundStyle(.white)
-                                    Text("· \(spot.distanceMiles, specifier: "%.1f") mi")
-                                        .font(.caption)
-                                        .foregroundStyle(.white.opacity(0.7))
-                                }
-                                Text(spot.summary)
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.75))
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                Text("more")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.white.opacity(0.5))
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.trailing, 80)
-                .padding(.bottom, 110)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    LinearGradient(colors: [.clear, .black.opacity(0.6)],
-                                   startPoint: .top, endPoint: .bottom)
-                        .allowsHitTesting(false)
-                )
+            HStack(alignment: .bottom, spacing: 12) {
+                attribution
+                Spacer(minLength: 0)
+                actionRail
             }
+            .padding(.horizontal, 16)
+            // Clears the floating nav pill, which hovers over this content.
+            .padding(.bottom, 146)
         }
-        .sheet(isPresented: $showComments) {
-            CommentsSheet(clip: clip)
-        }
-        .sheet(isPresented: $showShare) {
-            SharePlaceSheet(clip: clip)
-        }
+        .sheet(isPresented: $showComments) { CommentsSheet(clip: clip) }
+        .sheet(isPresented: $showShare) { SharePlaceSheet(clip: clip) }
         .sheet(isPresented: $showDetail) {
-            if let spot = clip.spot {
-                SpotDetailView(spot: spot)
+            if let spot = clip.spot { SpotDetailView(spot: spot) }
+        }
+    }
+
+    // MARK: Right-hand rail
+
+    private var actionRail: some View {
+        VStack(spacing: 18) {
+            GoldRailButton(icon: "heart", activeIcon: "heart.fill",
+                           count: clip.likeCount, isActive: clip.likedByMe) {
+                toggleLike()
+            }
+            GoldRailButton(icon: "bubble.right", activeIcon: "bubble.right.fill",
+                           count: clip.comments.count) {
+                showComments = true
+            }
+            GoldRailButton(icon: "paperplane", activeIcon: "paperplane.fill") {
+                showShare = true
+            }
+            GoldRailButton(icon: "bookmark", activeIcon: "bookmark.fill",
+                           isActive: clip.savedByMe) {
+                clip.savedByMe.toggle()
+                try? modelContext.save()
             }
         }
     }
 
-    private func railButton(icon: String, tint: Color, count: Int?, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: icon)
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .shadow(radius: 4)
-                if let count {
-                    Text("\(count)")
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.white)
+    // MARK: Bottom-left attribution
+
+    private var attribution: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                // Gold ring: this clip's author, lit against the media.
+                GlassOrbAvatar(emoji: clip.emoji, hue: clip.hueA, size: 42, isActive: true)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(clip.authorName)
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("\(handle) · \(clip.capturedAt.relativeHour)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                GoldChip(title: isFollowing ? "Following" : "Follow",
+                         systemImage: isFollowing ? "checkmark" : "plus",
+                         isFilled: isFollowing) {
+                    isFollowing.toggle()
                 }
             }
+            .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
+
+            Text(clip.label)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(captionExpanded ? 6 : 1)
+
+            if let spot = clip.spot {
+                Button {
+                    showDetail = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "mappin.circle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.gold)
+                            Text(spot.name)
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("· \(spot.distanceMiles, specifier: "%.1f") mi")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        if captionExpanded {
+                            Text(spot.summary)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.textSecondary)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background {
+                        GlassCard(cornerRadius: 14) { Color.clear }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                withAnimation(.easeOut(duration: 0.22)) { captionExpanded.toggle() }
+            } label: {
+                Text(captionExpanded ? "See less" : "See more")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Theme.goldSoft)
+            }
+            .buttonStyle(.plain)
         }
+        // Capped so a long caption wraps rather than running under the rail.
+        .frame(maxWidth: 280, alignment: .leading)
     }
 
     private func toggleLike() {
@@ -199,22 +294,20 @@ struct CommentsSheet: View {
             HStack(spacing: 10) {
                 TextField("Add a comment…", text: $draft)
                     .textFieldStyle(.plain)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Capsule().fill(Theme.surfaceLight))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background {
+                        Capsule().fill(.ultraThinMaterial)
+                            .overlay { Capsule().strokeBorder(Theme.glassRimTop.opacity(0.35), lineWidth: 1) }
+                    }
                     .foregroundStyle(Theme.textPrimary)
                     .onSubmit(post)
-                Button(action: post) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 30))
-                        .foregroundStyle(draft.isEmpty ? Theme.textSecondary : Theme.accent)
-                }
-                .disabled(draft.isEmpty)
+                SendButton(enabled: !draft.isEmpty, action: post)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .background(Theme.surface)
+        .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
@@ -270,7 +363,7 @@ struct SharePlaceSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "dot.radiowaves.left.and.right")
-                                .foregroundStyle(beaconPosted ? .green : Theme.accent)
+                                .foregroundStyle(beaconPosted ? .green : Theme.gold)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(beaconPosted ? "Beacon posted" : "Post as public beacon")
                                     .font(.subheadline.weight(.semibold))
@@ -285,14 +378,13 @@ struct SharePlaceSheet: View {
                             }
                         }
                         .padding(14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 14)
-                                .fill(Theme.surfaceLight)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 14)
-                                        .strokeBorder(Theme.accent.opacity(0.4), lineWidth: 1)
-                                )
-                        )
+                        .background {
+                            GlassCard(cornerRadius: 14) { Color.clear }
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .strokeBorder(Theme.gold.opacity(0.45), lineWidth: 1)
+                                }
+                        }
                     }
                     .disabled(beaconPosted || clip.spot == nil)
                 }
@@ -300,7 +392,7 @@ struct SharePlaceSheet: View {
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
         }
-        .background(Theme.surface)
+        .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         // Guard clause: posting a public beacon requires a public profile.
@@ -335,11 +427,11 @@ struct SharePlaceSheet: View {
                                 .foregroundStyle(.green)
                         } else {
                             Image(systemName: "paperplane")
-                                .foregroundStyle(Theme.accent)
+                                .foregroundStyle(Theme.gold)
                         }
                     }
                     .padding(14)
-                    .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surfaceLight))
+                    .background { GlassCard(cornerRadius: 14) { Color.clear } }
                 }
                 .disabled(sentTo.contains(chat.id))
             }
@@ -364,7 +456,7 @@ struct SharePlaceSheet: View {
             return
         }
         let beacon = Beacon(spot: spot, host: me,
-                            note: "found this on Explog — who's in?",
+                            note: "found this on Ralli — who's in?",
                             startsAt: .now.addingTimeInterval(3600 * 2),
                             capacity: 10)
         beacon.isPublic = true
@@ -404,7 +496,7 @@ struct SpotDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Insight", systemImage: "sparkles")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(Theme.gold)
                         Text(spot.aiInsight)
                             .font(.subheadline)
                             .foregroundStyle(Theme.textPrimary.opacity(0.85))
@@ -414,7 +506,7 @@ struct SpotDetailView: View {
                     }
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 16).fill(Theme.surface))
+                    .background(RoundedRectangle(cornerRadius: 16).fill(Theme.baseElevated))
 
                     Text("VISITOR NOTES")
                         .font(.caption.weight(.bold))
@@ -449,13 +541,13 @@ struct SpotDetailView: View {
                             .foregroundStyle(.black)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(Capsule().fill(Theme.accent))
+                            .background(Capsule().fill(Theme.gold))
                     }
                     .padding(.top, 6)
                 }
                 .padding(20)
             }
-            .background(Theme.background.ignoresSafeArea())
+            .background(GlassBackground())
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
