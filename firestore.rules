@@ -1,0 +1,57 @@
+rules_version = '2';
+
+// Explog Firestore rules.
+//
+// Principle: default deny, and every write that needs validation (handle
+// claims, friend requests, friendships) goes through a Cloud Function using the
+// Admin SDK, which bypasses these rules entirely. Clients therefore get read
+// access plus a narrow self-update path, and nothing else.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Fields a user may edit directly on their own profile. Identity fields
+    // (uid, handle, friendCode, createdAt, referredBy) are server-owned.
+    function onlySoftProfileFields() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['name', 'avatarEmoji', 'city', 'bio', 'interests', 'isPrivate', 'updatedAt']);
+    }
+
+    // users/{uid} — the public directory. Readable by any signed-in user so
+    // profiles, search results and friend rows can render.
+    match /users/{uid} {
+      allow get, list: if signedIn();
+      // Creation is createProfile()'s job: it claims the handle atomically.
+      allow create, delete: if false;
+      allow update: if isSelf(uid) && onlySoftProfileFields();
+
+      // Subcollections (friends, requests, devices, blocked) are written only
+      // by Cloud Functions. Phase 2+ opens reads per-collection as they land.
+      match /{subcollection=**} {
+        allow read, write: if false;
+      }
+    }
+
+    // Uniqueness claim docs. No client access at all — availability is checked
+    // through the checkHandleAvailable callable.
+    match /handles/{handle} {
+      allow read, write: if false;
+    }
+
+    match /friendCodes/{code} {
+      allow read, write: if false;
+    }
+
+    // Anything not matched above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

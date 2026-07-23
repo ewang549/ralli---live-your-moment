@@ -6,6 +6,15 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA91A4E83011803800162262 /* StreamChatSwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = AA91A4E73011803800162262 /* StreamChatSwiftUI */; };
+		AAABF3A630103C1D00F9D18B /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3A530103C1D00F9D18B /* FirebaseCore */; };
+		AAABF3A830103C2400F9D18B /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3A730103C2400F9D18B /* FirebaseAuth */; };
+		AAABF3AA30103C2D00F9D18B /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3A930103C2D00F9D18B /* FirebaseFirestore */; };
+		AAABF3AC30103C3400F9D18B /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3AB30103C3400F9D18B /* FirebaseMessaging */; };
+		AB91A4F03011803900162262 /* StreamChat in Frameworks */ = {isa = PBXBuildFile; productRef = AB91A4EF3011803900162262 /* StreamChat */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		AAABF38330102DD100F9D18B /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +61,12 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AAABF3AC30103C3400F9D18B /* FirebaseMessaging in Frameworks */,
+				AAABF3A630103C1D00F9D18B /* FirebaseCore in Frameworks */,
+				AAABF3A830103C2400F9D18B /* FirebaseAuth in Frameworks */,
+				AA91A4E83011803800162262 /* StreamChatSwiftUI in Frameworks */,
+				AB91A4F03011803900162262 /* StreamChat in Frameworks */,
+				AAABF3AA30103C2D00F9D18B /* FirebaseFirestore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +93,7 @@
 				AAABF37530102DD000F9D18B /* explog */,
 				AAABF38530102DD100F9D18B /* explogTests */,
 				AAABF38F30102DD100F9D18B /* explogUITests */,
+				AAABF3A430103C1D00F9D18B /* Frameworks */,
 				AAABF37430102DD000F9D18B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +106,13 @@
 				AAABF38C30102DD100F9D18B /* explogUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		AAABF3A430103C1D00F9D18B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -112,6 +135,12 @@
 			);
 			name = explog;
 			packageProductDependencies = (
+				AAABF3A530103C1D00F9D18B /* FirebaseCore */,
+				AAABF3A730103C2400F9D18B /* FirebaseAuth */,
+				AAABF3A930103C2D00F9D18B /* FirebaseFirestore */,
+				AAABF3AB30103C3400F9D18B /* FirebaseMessaging */,
+				AA91A4E73011803800162262 /* StreamChatSwiftUI */,
+				AB91A4EF3011803900162262 /* StreamChat */,
 			);
 			productName = explog;
 			productReference = AAABF37330102DD000F9D18B /* explog.app */;
@@ -195,6 +224,10 @@
 			);
 			mainGroup = AAABF36A30102DD000F9D18B;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				AA91A4E63011803800162262 /* XCRemoteSwiftPackageReference "stream-chat-swiftui" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AAABF37430102DD000F9D18B /* Products */;
 			projectDirPath = "";
@@ -390,10 +423,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6JV8CSBD6P;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Explog uses the camera to capture your 3-second logs.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Explog uses your location to show nearby experiences and beacons.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Explog records ambient sound with your video logs.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -403,13 +440,13 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = EJ.explog;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ej.explog;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -432,10 +469,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6JV8CSBD6P;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Explog uses the camera to capture your 3-second logs.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Explog uses your location to show nearby experiences and beacons.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Explog records ambient sound with your video logs.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -445,13 +486,13 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = EJ.explog;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ej.explog;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -605,6 +646,57 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA91A4E63011803800162262 /* XCRemoteSwiftPackageReference "stream-chat-swiftui" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/GetStream/stream-chat-swiftui";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.7.0;
+			};
+		};
+		AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.16.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA91A4E73011803800162262 /* StreamChatSwiftUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA91A4E63011803800162262 /* XCRemoteSwiftPackageReference "stream-chat-swiftui" */;
+			productName = StreamChatSwiftUI;
+		};
+		AAABF3A530103C1D00F9D18B /* FirebaseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseCore;
+		};
+		AAABF3A730103C2400F9D18B /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		AAABF3A930103C2D00F9D18B /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
+		AAABF3AB30103C3400F9D18B /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
+		};
+		AB91A4EF3011803900162262 /* StreamChat */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = StreamChat;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AAABF36B30102DD000F9D18B /* Project object */;
 }

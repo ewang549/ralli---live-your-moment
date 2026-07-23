@@ -60,3 +60,11 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+.stream/
+Secrets.xcconfig
+build/
+
+# Cloud Functions dependencies
+functions/node_modules/
+functions/.env*
+
