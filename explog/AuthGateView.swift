@@ -15,8 +15,12 @@ struct AuthGateView: View {
         case ready
     }
 
-    @State private var stage: Stage = Auth.auth().currentUser == nil ? .signedOut : .checkingProfile
-    @State private var listener: AuthStateDidChangeListenerHandle?
+    /// Start in `.checkingProfile`, never `.signedOut`: auth resolves
+    /// asynchronously, so we don't know yet. Guessing here is what let demo
+    /// data reach a real account.
+    @State private var stage: Stage = .checkingProfile
+    @State private var session = AuthSession()
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         Group {
@@ -33,16 +37,28 @@ struct AuthGateView: View {
                 MainTabView()
             }
         }
+        .environment(session)
         .onAppear {
-            guard listener == nil else { return }
-            listener = Auth.auth().addStateDidChangeListener { _, user in
-                if user == nil {
+#if DEBUG
+            // CLI hook: SIMCTL_CHILD_EXPLOG_RESET_CACHE=1 forces the next claim
+            // to treat the local store as another account's and wipe it.
+            if ProcessInfo.processInfo.environment["EXPLOG_RESET_CACHE"] == "1" {
+                LocalStore.ownerUID = nil
+            }
+#endif
+            session.onChange = { uid in
+                // Scope the cache to the account before any view reads it, so a
+                // sign-in/sign-out/account-switch can't inherit stale rows.
+                LocalStore.claim(by: uid, context: modelContext)
+
+                if uid == nil {
                     withAnimation { stage = .signedOut }
                 } else {
                     stage = .checkingProfile
                     Task { await resolveProfile() }
                 }
             }
+            session.start()
         }
     }
 

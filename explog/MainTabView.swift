@@ -29,6 +29,8 @@ struct MainTabView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var router = AppRouter()
     @State private var orientation = OrientationObserver()
+    /// Injected by AuthGateView; seeding depends on *resolved* auth.
+    @Environment(AuthSession.self) private var session
 
     // Five surfaces, left to right: Profile · Pulse · Camera · Places · Beacons.
     enum Tab { case profile, pulse, places, beacons }
@@ -62,7 +64,7 @@ struct MainTabView: View {
         }
         .task {
             orientation.start()
-            SeedData.seedIfNeeded(context: modelContext)
+            SeedData.seedIfNeeded(context: modelContext, session: session)
 #if DEBUG
             // CLI screenshot hooks: SIMCTL_CHILD_EXPLOG_AUTO_OPEN=profile|places|beacons|capture
             switch ProcessInfo.processInfo.environment["EXPLOG_AUTO_OPEN"] {
@@ -133,5 +135,6 @@ struct MainTabView: View {
 
 #Preview {
     MainTabView()
+        .environment(AuthSession())
         .modelContainer(for: Friend.self, inMemory: true)
 }

@@ -82,6 +82,131 @@ function publicProfile(data) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed-window rate limiter with a failure-triggered lockout, stored at
+ * `rateLimits/{uid}__{action}`.
+ *
+ * Friend codes are only ~8.9e8 possibilities, so an unthrottled lookup endpoint
+ * is a directory-enumeration oracle: guess codes until one resolves and harvest
+ * profiles. Two layers guard it — a per-window cap on *all* calls, and a
+ * lockout once too many calls in a row come back empty, which is the signature
+ * of guessing rather than of a real person typing a code off a friend's screen.
+ *
+ * The whole read-modify-write runs in a transaction so parallel calls from the
+ * same uid can't race past the cap.
+ */
+async function enforceRateLimit(uid, action, options) {
+  const {
+    maxAttempts,      // calls allowed per window
+    windowMs,
+    maxFailures,      // consecutive misses before lockout
+    lockoutMs,
+  } = options;
+
+  const ref = db.doc(`rateLimits/${uid}__${action}`);
+  const now = Date.now();
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.exists ? snap.data() : {};
+
+    if (typeof data.lockedUntil === "number" && data.lockedUntil > now) {
+      const minutes = Math.ceil((data.lockedUntil - now) / 60000);
+      throw new HttpsError(
+        "resource-exhausted",
+        `Too many lookups. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`
+      );
+    }
+
+    const windowStart = typeof data.windowStart === "number" ? data.windowStart : 0;
+    const freshWindow = now - windowStart >= windowMs;
+    const attempts = freshWindow ? 0 : (data.attempts || 0);
+
+    if (attempts >= maxAttempts) {
+      throw new HttpsError(
+        "resource-exhausted",
+        "Too many lookups. Slow down and try again shortly."
+      );
+    }
+
+    tx.set(ref, {
+      windowStart: freshWindow ? now : windowStart,
+      attempts: attempts + 1,
+      // Consecutive failures survive window resets; only a hit clears them.
+      failures: data.failures || 0,
+      lockedUntil: data.lockedUntil || 0,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+
+  return {
+    /// Call after the lookup so the limiter learns hit vs miss.
+    async record(hit) {
+      if (hit) {
+        await ref.set({ failures: 0 }, { merge: true });
+        return;
+      }
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const failures = ((snap.exists ? snap.data().failures : 0) || 0) + 1;
+        const update = { failures };
+        if (failures >= maxFailures) {
+          // Lock out and reset the counter so the next offence starts clean.
+          update.lockedUntil = Date.now() + lockoutMs;
+          update.failures = 0;
+        }
+        tx.set(ref, update, { merge: true });
+      });
+    },
+  };
+}
+
+/**
+ * Callable: resolveFriendCode({ code }) -> { profile }
+ *
+ * Add-by-code / QR entry point (Phase 2). Rate limited and lockout-guarded —
+ * see enforceRateLimit for why this endpoint specifically needs it.
+ */
+exports.resolveFriendCode = onCall(async (request) => {
+  const uid = requireAuth(request);
+
+  const raw = (request.data || {}).code;
+  if (typeof raw !== "string") {
+    throw new HttpsError("invalid-argument", "A friend code is required.");
+  }
+  // Normalize the way people actually type codes: case and spacing are noise.
+  const code = raw.trim().toUpperCase().replace(/[\s-]/g, "");
+  if (!/^[A-Z0-9]{4,12}$/.test(code)) {
+    throw new HttpsError("invalid-argument", "That doesn't look like a friend code.");
+  }
+
+  const limiter = await enforceRateLimit(uid, "resolveFriendCode", {
+    maxAttempts: 15,
+    windowMs: 5 * 60 * 1000,   // 15 lookups per 5 minutes
+    maxFailures: 20,           // 20 misses in a row
+    lockoutMs: 30 * 60 * 1000, // 30 minute lockout
+  });
+
+  const claim = await db.doc(`friendCodes/${code}`).get();
+  if (!claim.exists) {
+    await limiter.record(false);
+    throw new HttpsError("not-found", "No one found with that code.");
+  }
+
+  const target = await db.doc(`users/${claim.data().uid}`).get();
+  if (!target.exists) {
+    await limiter.record(false);
+    throw new HttpsError("not-found", "No one found with that code.");
+  }
+
+  await limiter.record(true);
+  return { profile: publicProfile(target.data()) };
+});
+
 /**
  * Callable: checkHandleAvailable({ handle }) -> { available, reason? }
  *

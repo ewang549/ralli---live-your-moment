@@ -9,11 +9,17 @@ import FirebaseAuth
 /// add friends. Set `SIMCTL_CHILD_EXPLOG_SEED_DEMO=1` to force demo data even
 /// while signed in (screenshots, UI tests).
 enum SeedData {
-    static func seedIfNeeded(context: ModelContext) {
+    /// Seeds only when auth is **resolved** and nobody is signed in.
+    ///
+    /// Taking `session` rather than reading `Auth.auth().currentUser` is the
+    /// whole point: on a cold start Firebase restores the user asynchronously,
+    /// so a synchronous check reports "signed out" for a moment and would seed
+    /// demo friends into a real account's store. See `AuthSession`.
+    @MainActor
+    static func seedIfNeeded(context: ModelContext, session: AuthSession) {
 #if DEBUG
         let forced = ProcessInfo.processInfo.environment["EXPLOG_SEED_DEMO"] == "1"
-        // A signed-in account is a real account: no fake friends in its graph.
-        guard forced || Auth.auth().currentUser == nil else { return }
+        guard forced || session.isConfirmedSignedOut else { return }
         seed(context: context)
 #endif
     }
