@@ -25,17 +25,44 @@ enum SeedData {
     }
 
 #if DEBUG
-    private static func seed(context: ModelContext) {
-        let existing = (try? context.fetchCount(FetchDescriptor<Friend>())) ?? 0
-        guard existing == 0 else { return }
+    /// True when the demo roster is already loaded.
+    @MainActor
+    static func isDemoDataLoaded(context: ModelContext) -> Bool {
+        let descriptor = FetchDescriptor<Friend>(predicate: #Predicate { $0.isDemo })
+        return ((try? context.fetchCount(descriptor)) ?? 0) > 0
+    }
 
-        let me = Friend(name: "Ethan", emoji: "🧑‍💻", hue: 0.58, isMe: true)
-        me.email = "ethan@businessrate.com"
-        me.phone = "(415) 555-0132"
-        me.city = "San Francisco"
-        me.age = 24
-        me.bio = "building explog, logging every hour of it"
-        me.interests = ["code", "hike", "food"]
+    /// Loads the demo roster, chats, clips, spots and beacons.
+    ///
+    /// Safe to call while signed in to a real account: it reuses the existing
+    /// "me" row rather than creating a second `isMe` profile, so your real
+    /// handle/profile survives and the fake friends are layered around it.
+    /// Every row it creates is marked `isDemo` so it can be cleared again.
+    @MainActor
+    static func seed(context: ModelContext) {
+        guard !isDemoDataLoaded(context: context) else { return }
+
+        let allFriends = (try? context.fetch(FetchDescriptor<Friend>())) ?? []
+
+        // Reuse the signed-in account's profile when there is one.
+        let me: Friend
+        if let realMe = allFriends.first(where: { $0.isMe }) {
+            me = realMe
+            if me.city.isEmpty { me.city = "San Francisco" }
+            if me.bio.isEmpty { me.bio = "building explog, logging every hour of it" }
+            if me.interests.isEmpty { me.interests = ["code", "hike", "food"] }
+        } else {
+            let demoMe = Friend(name: "Ethan", emoji: "🧑‍💻", hue: 0.58, isMe: true)
+            demoMe.email = "ethan@businessrate.com"
+            demoMe.phone = "(415) 555-0132"
+            demoMe.city = "San Francisco"
+            demoMe.age = 24
+            demoMe.bio = "building explog, logging every hour of it"
+            demoMe.interests = ["code", "hike", "food"]
+            demoMe.isDemo = true
+            context.insert(demoMe)
+            me = demoMe
+        }
 
         let jordan = Friend(name: "Jordan", emoji: "🏄", hue: 0.08)
         jordan.city = "San Francisco"; jordan.age = 25
@@ -58,8 +85,13 @@ enum SeedData {
         sam.city = "San Francisco"; sam.age = 28
         sam.bio = "roasting since 2019"; sam.interests = ["food", "music"]
 
-        let friends = [me, jordan, jonny, taylor, maya, sam]
-        friends.forEach { context.insert($0) }
+        // `me` is intentionally not re-inserted: it may already be the real,
+        // signed-in account's row.
+        let demoFriends = [jordan, jonny, taylor, maya, sam]
+        demoFriends.forEach {
+            $0.isDemo = true
+            context.insert($0)
+        }
 
         let now = Date.now
         func hoursAgo(_ h: Double) -> Date { now.addingTimeInterval(-3600 * h) }

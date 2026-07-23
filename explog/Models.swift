@@ -51,6 +51,9 @@ final class Friend {
     var handleDisplay: String = ""
     /// Short shareable code (add-by-code / QR / ambassador attribution).
     var friendCode: String = ""
+    /// Marks a row created by `SeedData` so demo content can be loaded and
+    /// cleared independently of real accounts and real friends.
+    var isDemo: Bool = false
 
     // Profile metadata (UserProfileView).
     var email: String = ""

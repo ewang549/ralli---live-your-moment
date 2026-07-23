@@ -15,13 +15,87 @@ struct UserProfileView: View {
 
     private var me: Friend? { friends.first { $0.isMe } }
 
+    @State private var isRecovering = false
+    @State private var recoveryError: String?
+
     var body: some View {
         if let me {
             profileForm(for: me)
         } else {
-            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            // No local "me" row. Normally AuthGateView caches it from Firestore
+            // on launch; if that hasn't happened (offline, or the cache was
+            // wiped mid-session) show a real state with a way out instead of a
+            // spinner that never resolves.
+            missingProfileState
         }
     }
+
+    private var missingProfileState: some View {
+        VStack(spacing: 14) {
+            Text("👤").font(.system(size: 52))
+            Text("Profile not loaded")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+            Text(recoveryError ?? "Your profile lives on the server and hasn't been cached on this device yet.")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+
+            Button {
+                reloadProfile()
+            } label: {
+                if isRecovering {
+                    ProgressView().tint(.black)
+                } else {
+                    Text("Reload profile").font(.subheadline.weight(.semibold))
+                }
+            }
+            .foregroundStyle(.black)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 11)
+            .background(Capsule().fill(Theme.gold))
+            .disabled(isRecovering)
+
+#if DEBUG
+            demoDataButton
+#endif
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Pulls the profile from Firestore and rebuilds the local `isMe` row.
+    private func reloadProfile() {
+        isRecovering = true
+        recoveryError = nil
+        Task { @MainActor in
+            do {
+                if let profile = try await FirestoreService.currentProfile() {
+                    FirestoreService.cacheLocally(profile, context: modelContext)
+                } else {
+                    recoveryError = "No profile found for this account."
+                }
+            } catch {
+                recoveryError = error.localizedDescription
+            }
+            isRecovering = false
+        }
+    }
+
+#if DEBUG
+    /// Dev-only: demo content is gated off real accounts, so this is how you
+    /// get the fake roster back while signed in.
+    private var demoDataButton: some View {
+        Button {
+            SeedData.seed(context: modelContext)
+        } label: {
+            Label("Load demo data", systemImage: "wand.and.stars")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.top, 6)
+    }
+#endif
 
     private func profileForm(for me: Friend) -> some View {
         @Bindable var profile = me
@@ -146,6 +220,10 @@ struct UserProfileView: View {
                     }
                     .padding(.top, 6)
                 }
+
+#if DEBUG
+                developerSection
+#endif
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 110)
@@ -153,6 +231,58 @@ struct UserProfileView: View {
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: me.isPrivate) { try? modelContext.save() }
     }
+
+#if DEBUG
+    /// Dev-only controls. Demo content no longer loads automatically for a
+    /// signed-in account (that's what leaked fake friends into real accounts),
+    /// so loading and clearing it is now an explicit action.
+    private var developerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Developer")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Theme.textSecondary)
+
+            HStack(spacing: 10) {
+                Button {
+                    SeedData.seed(context: modelContext)
+                } label: {
+                    Label(demoLoaded ? "Demo data loaded" : "Load demo data",
+                          systemImage: demoLoaded ? "checkmark.circle.fill" : "wand.and.stars")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(demoLoaded ? Theme.gold : Theme.textPrimary)
+                }
+                .disabled(demoLoaded)
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    clearDemoData()
+                } label: {
+                    Text("Clear demo").font(.caption.weight(.semibold))
+                }
+                .disabled(!demoLoaded)
+            }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+        }
+        .padding(.top, 6)
+    }
+
+    private var demoLoaded: Bool { friends.contains { $0.isDemo } }
+
+    /// Removes only the seeded rows, leaving the real account intact. Chats and
+    /// clips go too, since every one of them references a demo friend.
+    private func clearDemoData() {
+        for friend in friends where friend.isDemo {
+            modelContext.delete(friend)
+        }
+        let chats = (try? modelContext.fetch(FetchDescriptor<Chat>())) ?? []
+        for chat in chats where chat.members.isEmpty || chat.members.allSatisfy({ $0.isMe }) {
+            modelContext.delete(chat)
+        }
+        try? modelContext.save()
+    }
+#endif
 
     /// Tear down the Stream session fully, then sign out of Firebase —
     /// the auth gate flips back to the Welcome screen.

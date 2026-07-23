@@ -82,6 +82,13 @@ struct AuthGateView: View {
         for attempt in 0..<3 {
             do {
                 let profile = try await FirestoreService.currentProfile()
+                if let profile {
+                    // Refresh the local cache on every launch, not just at
+                    // sign-up. Without this the app has no `isMe` Friend row
+                    // after a cache wipe, and every screen that resolves "me"
+                    // (Profile, montage, capture) has nothing to show.
+                    FirestoreService.cacheLocally(profile, context: modelContext)
+                }
                 withAnimation { stage = profile == nil ? .needsProfile : .ready }
                 return
             } catch {

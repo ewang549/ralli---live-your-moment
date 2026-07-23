@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 import FirebaseAuth
 import FirebaseFirestore
+import os
 
 // MARK: - Callable Cloud Functions
 
@@ -207,5 +208,11 @@ enum FirestoreService {
         friend.isPrivate = profile.isPrivate
 
         try? context.save()
+
+        // There must be exactly one "me". Two would mean demo seeding created a
+        // second profile alongside the real account, and every screen that
+        // resolves the current user would pick one at random.
+        let meCount = ((try? context.fetch(descriptor)) ?? []).filter(\.isMe).count
+        accountLog.info("cached profile @\(profile.handle, privacy: .public); isMe rows = \(meCount)")
     }
 }
