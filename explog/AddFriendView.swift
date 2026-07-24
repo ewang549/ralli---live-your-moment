@@ -48,7 +48,6 @@ struct AddFriendView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     private var searchField: some View {
@@ -56,7 +55,7 @@ struct AddFriendView: View {
             HStack(spacing: 9) {
                 Text("@")
                     .font(.system(size: 17, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.gold)
+                    .foregroundStyle(Theme.iris)
                 TextField("their User ID", text: $query)
                     .font(.system(size: 17, weight: .semibold, design: .rounded))
                     .foregroundStyle(Theme.textPrimary)
@@ -74,11 +73,7 @@ struct AddFriendView: View {
             .padding(.vertical, 14)
             .background {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Theme.glassRimTop.opacity(0.4), lineWidth: 1)
-                    }
+                    .fill(Theme.sunken)
             }
 
             Text("Type a friend's User ID or their 6-character code.")
@@ -135,7 +130,7 @@ struct AddFriendView: View {
                     .foregroundStyle(Theme.textSecondary)
                 Text(me.friendCode)
                     .font(.system(size: 26, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(Theme.goldSheen)
+                    .foregroundStyle(Theme.irisGradient)
                 Text("Share this so friends can add you")
                     .font(.caption2)
                     .foregroundStyle(Theme.textSecondary)

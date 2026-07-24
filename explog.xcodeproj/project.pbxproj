@@ -432,6 +432,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Ralli uses the camera to capture your 3-second logs.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Ralli uses your location to show nearby experiences and beacons.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Ralli records ambient sound with your video logs.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ralli saves your edited logs to your photo library.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -479,6 +480,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Ralli uses the camera to capture your 3-second logs.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Ralli uses your location to show nearby experiences and beacons.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Ralli records ambient sound with your video logs.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ralli saves your edited logs to your photo library.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

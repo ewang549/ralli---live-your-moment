@@ -38,17 +38,14 @@ struct MessageThreadView: View {
                 }
             }
 
-            // Real-time input bar with send — glass field, gold send.
+            // Real-time input bar with send — sunken field, iris send.
             HStack(spacing: 10) {
                 TextField("Message…", text: $draft)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
                     .background {
-                        Capsule().fill(.ultraThinMaterial)
-                            .overlay {
-                                Capsule().strokeBorder(Theme.glassRimTop.opacity(0.35), lineWidth: 1)
-                            }
+                        Capsule().fill(Theme.sunken)
                     }
                     .foregroundStyle(Theme.textPrimary)
                     .onSubmit(send)
@@ -57,7 +54,7 @@ struct MessageThreadView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background {
-                Rectangle().fill(.ultraThinMaterial).ignoresSafeArea(edges: .bottom)
+                Rectangle().fill(Theme.surface).ignoresSafeArea(edges: .bottom)
             }
         }
     }
@@ -73,7 +70,7 @@ struct MessageThreadView: View {
     }
 }
 
-/// The one gold control in a thread: a metal disc that dims to glass when
+/// The one iris control in a thread: a solid disc that dims to sunken when
 /// there's nothing to send. Shared by every composer in the app.
 struct SendButton: View {
     let enabled: Bool
@@ -83,12 +80,12 @@ struct SendButton: View {
         Button(action: action) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(enabled ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textSecondary))
+                .foregroundStyle(enabled ? Theme.onIris : Theme.textSecondary)
                 .frame(width: 38, height: 38)
                 .background {
                     Circle()
-                        .fill(enabled ? AnyShapeStyle(Theme.goldSheen) : AnyShapeStyle(Material.ultraThinMaterial))
-                        .shadow(color: enabled ? Theme.goldGlow.opacity(0.5) : .clear, radius: 10)
+                        .fill(enabled ? AnyShapeStyle(Theme.iris) : AnyShapeStyle(Theme.sunken))
+                        .shadow(color: enabled ? Theme.iris.opacity(0.35) : .clear, radius: 10, y: 2)
                 }
         }
         .buttonStyle(.plain)
@@ -122,7 +119,6 @@ struct ChatDrawerView: View {
         .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -160,11 +156,10 @@ struct ChatDetailView: View {
                     if chat.streak > 0 {
                         Text("🔥 \(chat.streak)")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.gold)
+                            .foregroundStyle(Theme.coral)
                     }
                 }
             }
-            .preferredColorScheme(.dark)
     }
 }
 
@@ -172,6 +167,8 @@ struct ChatDetailView: View {
 
 struct MessageBubble: View {
     let message: Message
+
+    @State private var showSpotDetail = false
 
     private var isMine: Bool { message.author?.isMe ?? false }
     private let tapbacks = ["❤️", "👍", "😂", "‼️", "❓"]
@@ -186,46 +183,39 @@ struct MessageBubble: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
                 if let spotName = message.sharedSpotName {
-                    HStack(spacing: 6) {
-                        Image(systemName: "mappin.circle.fill")
-                            .foregroundStyle(Theme.gold)
-                        Text(spotName)
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background { GlassCard(cornerRadius: 12) { Color.clear } }
+                    // A shared-location card. When the real spot rode along with
+                    // the message it's a button into the same detail sheet the
+                    // Places feed opens; legacy/name-only shares stay static.
+                    locationCard(name: spotName)
+                }
+                // A reaction broadcast: the reacted clip's preview with the
+                // reaction emoji overlaid on top of it, per spec.
+                if message.isReaction, let emoji = message.reactionEmoji {
+                    reactionCard(clip: message.reactedClip, emoji: emoji)
                 }
                 if !message.text.isEmpty {
                     Text(message.text)
                         .font(.subheadline)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        // Mine in gold metal, theirs in glass — the thread reads
-                        // as two voices without a second accent colour.
+                        // Mine in iris, theirs on a sunken surface — the thread
+                        // reads as two voices without a second accent colour.
                         .background {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(isMine ? AnyShapeStyle(Theme.goldSheen)
-                                             : AnyShapeStyle(Material.ultraThinMaterial))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .strokeBorder(isMine ? Color.clear : Theme.glassRimTop.opacity(0.3),
-                                                      lineWidth: 1)
-                                }
-                                .shadow(color: isMine ? Theme.goldGlow.opacity(0.28) : .black.opacity(0.3),
-                                        radius: 8, y: 3)
+                                .fill(isMine ? AnyShapeStyle(Theme.iris)
+                                             : AnyShapeStyle(Theme.sunken))
                         }
-                        .foregroundStyle(isMine ? .black : Theme.textPrimary)
-                        // iMessage-style tapback badge, on neutral glass so it
-                        // never competes with the gold bubble beneath it.
+                        .foregroundStyle(isMine ? Theme.onIris : Theme.textPrimary)
+                        // iMessage-style tapback badge, on a surface chip so it
+                        // never competes with the bubble beneath it.
                         .overlay(alignment: isMine ? .topLeading : .topTrailing) {
                             if let tapback = message.tapback {
                                 Text(tapback)
                                     .font(.caption)
                                     .padding(5)
                                     .background {
-                                        Circle().fill(.ultraThinMaterial)
-                                            .overlay { Circle().strokeBorder(Theme.glassRimTop.opacity(0.4), lineWidth: 1) }
+                                        Circle().fill(Theme.surface)
+                                            .shadow(color: Color(hex: 0x14121E, alpha: 0.12), radius: 4, y: 1)
                                     }
                                     .offset(x: isMine ? -10 : 10, y: -12)
                             }
@@ -249,6 +239,81 @@ struct MessageBubble: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             if !isMine { Spacer(minLength: 60) }
+        }
+        // Reuses the Places detail view verbatim — one source of truth for a
+        // spot's metadata, AI insight, and visitor clips.
+        .sheet(isPresented: $showSpotDetail) {
+            if let spot = message.sharedSpot {
+                SpotDetailView(spot: spot)
+            }
+        }
+    }
+
+    /// A reaction broadcast bubble: a small looping preview of the friend's log
+    /// with the reaction emoji stamped on its bottom-left, mirroring where the
+    /// badge lands on the video container itself. Falls back to an emoji-only
+    /// chip if the underlying clip is gone.
+    @ViewBuilder
+    private func reactionCard(clip: Clip?, emoji: String) -> some View {
+        VStack(alignment: isMine ? .trailing : .leading, spacing: 4) {
+            Text(isMine ? "You reacted" : "Reacted")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+
+            if let clip {
+                ClipView(clip: clip, isActive: true)
+                    .frame(width: 118, height: 168)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                    }
+                    // Reaction context overlaid on the preview, bottom-left.
+                    .overlay(alignment: .bottomLeading) {
+                        Text(emoji)
+                            .font(.system(size: 24))
+                            .padding(7)
+                            .background(Circle().fill(.black.opacity(0.55)))
+                            .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
+                            .padding(8)
+                    }
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+            } else {
+                Text(emoji)
+                    .font(.system(size: 30))
+                    .padding(10)
+                    .background {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                    }
+            }
+        }
+    }
+
+    /// The location preview card. Tappable when the spot data came along.
+    @ViewBuilder
+    private func locationCard(name: String) -> some View {
+        let card = HStack(spacing: 6) {
+            Image(systemName: "mappin.circle.fill")
+                .foregroundStyle(Theme.iris)
+            Text(name)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+            if message.sharedSpot != nil {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background { GlassCard(cornerRadius: 12) { Color.clear } }
+
+        if message.sharedSpot != nil {
+            Button { showSpotDetail = true } label: { card }
+                .buttonStyle(.plain)
+        } else {
+            card
         }
     }
 }

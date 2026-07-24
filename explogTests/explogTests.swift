@@ -141,6 +141,43 @@ struct explogTests {
         #expect(!beacon.isPublic)
     }
 
+    // MARK: - Camera capture modes
+
+    @Test func captureModeCyclesInOrderAndWraps() {
+        // One tap per step: 3s → 5s → timelapse → jump cut → back to 3s.
+        #expect(CaptureMode.threeSeconds.next == .fiveSeconds)
+        #expect(CaptureMode.fiveSeconds.next == .timelapse)
+        #expect(CaptureMode.timelapse.next == .jumpCut)
+        #expect(CaptureMode.jumpCut.next == .threeSeconds)
+    }
+
+    @Test func cyclingEveryModeReturnsToStart() {
+        // Whatever the case count, a full lap lands back where it began — the
+        // guard that keeps `next` honest if a mode is ever added.
+        var mode = CaptureMode.threeSeconds
+        for _ in CaptureMode.allCases { mode = mode.next }
+        #expect(mode == .threeSeconds)
+    }
+
+    @Test func onlyTimerModesCountDown() {
+        #expect(CaptureMode.threeSeconds.countdownSeconds == 3)
+        #expect(CaptureMode.fiveSeconds.countdownSeconds == 5)
+        // Timelapse and jump cut fire immediately — no self-timer.
+        #expect(CaptureMode.timelapse.countdownSeconds == nil)
+        #expect(CaptureMode.jumpCut.countdownSeconds == nil)
+    }
+
+    @Test func everyModeHasExactlyOneButtonFace() {
+        // Each mode renders either a symbol or a text label, never both and
+        // never neither — otherwise the button comes up blank.
+        for mode in CaptureMode.allCases {
+            let hasSymbol = mode.symbolName != nil
+            let hasLabel = !mode.shortLabel.isEmpty
+            #expect(hasSymbol != hasLabel, "\(mode.title) must have a symbol or a label")
+            #expect(!mode.title.isEmpty)
+        }
+    }
+
     @Test func reactionsToggleCleanly() throws {
         let context = try makeContext()
         let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)

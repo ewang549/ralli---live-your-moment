@@ -36,7 +36,7 @@ struct NewGroupChatView: View {
                          ? "Pick at least 2 friends"
                          : "\(selected.count) selected")
                         .font(.caption)
-                        .foregroundStyle(selected.count < 2 ? Theme.textSecondary : Theme.gold)
+                        .foregroundStyle(selected.count < 2 ? Theme.textSecondary : Theme.iris)
 
                     ScrollView {
                         LazyVStack(spacing: 8) {
@@ -49,7 +49,7 @@ struct NewGroupChatView: View {
                     }
                     .scrollIndicators(.hidden)
 
-                    GoldButton(title: "Create group", busy: busy, enabled: canCreate) {
+                    PrimaryButton(title: "Create group", busy: busy, enabled: canCreate) {
                         createGroup()
                     }
                     .padding(.horizontal, 20)
@@ -65,7 +65,6 @@ struct NewGroupChatView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     private func selectableRow(_ friend: Friend) -> some View {
@@ -89,7 +88,7 @@ struct NewGroupChatView: View {
                     Spacer()
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 20))
-                        .foregroundStyle(isSelected ? Theme.gold : Theme.textSecondary.opacity(0.6))
+                        .foregroundStyle(isSelected ? Theme.iris : Theme.textSecondary.opacity(0.6))
                 }
                 .padding(11)
             }

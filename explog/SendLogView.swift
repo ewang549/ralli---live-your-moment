@@ -13,7 +13,15 @@ struct SendLogView: View {
     @Query private var friends: [Friend]
 
     @State private var selected: Set<UUID> = []
-    @State private var label = ""
+    @State private var label: String
+
+    /// `initialLabel` seeds the caption from any text added on the review screen.
+    init(media: CapturedMedia, initialLabel: String = "", onSent: @escaping () -> Void) {
+        self.media = media
+        self.onSent = onSent
+        _label = State(initialValue: initialLabel)
+    }
+
     @State private var emoji = "✨"
     @State private var hueA = Double.random(in: 0...1)
 
@@ -58,10 +66,10 @@ struct SendLogView: View {
                 } label: {
                     Text(selected.isEmpty ? "Pick at least one chat" : "Send to \(selected.count) chat\(selected.count == 1 ? "" : "s")")
                         .font(.headline)
-                        .foregroundStyle(.black)
+                        .foregroundStyle(selected.isEmpty ? Theme.textSecondary : Theme.onCoral)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
-                        .background(Capsule().fill(selected.isEmpty ? Theme.textSecondary : Theme.gold))
+                        .background(Capsule().fill(selected.isEmpty ? Theme.sunken : Theme.coral))
                 }
                 .disabled(selected.isEmpty)
                 .padding(.horizontal, 20)
@@ -76,7 +84,6 @@ struct SendLogView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder
@@ -105,7 +112,7 @@ struct SendLogView: View {
                             .font(.system(size: 26))
                             .padding(8)
                             .background(
-                                Circle().fill(emoji == option ? Theme.gold.opacity(0.35) : Theme.baseRaised)
+                                Circle().fill(emoji == option ? Theme.coralWash : Theme.baseRaised)
                             )
                     }
                 }
@@ -167,7 +174,7 @@ private struct AudienceRow: View {
                         } else if chat.streak > 0 {
                             Text("🔥 \(chat.streak)")
                                 .font(.caption)
-                                .foregroundStyle(Theme.gold)
+                                .foregroundStyle(Theme.coral)
                         }
                     }
                     Spacer()
@@ -177,7 +184,7 @@ private struct AudienceRow: View {
                     } else {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                             .font(.title3)
-                            .foregroundStyle(isSelected ? Theme.gold : Theme.textSecondary)
+                            .foregroundStyle(isSelected ? Theme.coral : Theme.textSecondary)
                     }
                 }
             }

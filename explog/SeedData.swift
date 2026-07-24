@@ -180,6 +180,14 @@ enum SeedData {
         sutro.address = "1004 Point Lobos Ave, San Francisco, CA"
         [tam, pinball, nightMarket, sutro].forEach { context.insert($0) }
 
+        // A shared-location card in a DM — tapping it opens the same spot detail
+        // sheet the Places feed uses (sharedSpot carries the real model along).
+        let sharedSpotMsg = Message(chat: jordanChat, author: jordan,
+                                    text: "found this — we should go 👀",
+                                    sentAt: hoursAgo(0.35), sharedSpotName: sutro.name)
+        sharedSpotMsg.sharedSpot = sutro
+        context.insert(sharedSpotMsg)
+
         let perspectives: [(Spot, String, String, String, Double, Double, Double)] = [
             (tam, "Aria", "above the fog line", "☁️", 0.55, 0.60, 5),
             (tam, "Ben", "east peak lookout", "🌄", 0.08, 0.12, 26),

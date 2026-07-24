@@ -39,7 +39,7 @@ struct MontageView: View {
                     HStack(spacing: 4) {
                         ForEach(0..<todaysClips.count, id: \.self) { i in
                             Capsule()
-                                .fill(i <= index ? Theme.gold : .white.opacity(0.3))
+                                .fill(i <= index ? Theme.iris : .white.opacity(0.3))
                                 .frame(height: 3)
                         }
                     }

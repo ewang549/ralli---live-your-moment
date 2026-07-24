@@ -108,7 +108,7 @@ enum LocalStore {
         do {
             try context.save()
         } catch {
-            accountLog.error("cache wipe failed: \(error.localizedDescription, privacy: .public)")
+            accountLog.error("cache wipe failed: \(error.localizedDescription.prefix(500), privacy: .public)")
         }
         let after = (try? context.fetchCount(FetchDescriptor<Friend>())) ?? -1
         accountLog.info("cache wipe: friends \(before) -> \(after)")

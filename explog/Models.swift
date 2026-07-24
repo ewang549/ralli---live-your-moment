@@ -115,6 +115,14 @@ final class Friend {
         clips.max { $0.capturedAt < $1.capturedAt }
     }
 
+    /// Drives the green dot on the chat list. There is no presence service yet,
+    /// so "online" is inferred from activity: they logged something inside the
+    /// last quarter hour. Point this at real presence when Phase 2 lands.
+    var isOnline: Bool {
+        guard let capturedAt = latestClip?.capturedAt else { return false }
+        return Date.now.timeIntervalSince(capturedAt) < 15 * 60
+    }
+
     /// "@handle" when the account is real, otherwise the local lookup ID.
     var displayUserId: String {
         let value = userId.isEmpty ? handle : userId
@@ -247,11 +255,25 @@ final class Message {
     var sentAt: Date
     /// Set when the message shares a discovery spot into the chat.
     var sharedSpotName: String?
+    /// The actual spot behind a shared-location card, so tapping it in the
+    /// thread can open the very same detail sheet the Places feed uses.
+    /// Optional to-one; nil on legacy messages and plain text.
+    var sharedSpot: Spot?
     /// iMessage-style tapback reaction (single emoji), nil when none.
     var tapback: String? = nil
     /// Set when the message belongs to an activity group chat instead of a
     /// direct chat (ActivityChatView) — the Beacon's id string.
     var activityId: String? = nil
+    /// When this message is a reaction *broadcast* onto a friend's video log,
+    /// the emoji that was tapped. The bubble then renders the reacted clip's
+    /// preview with this emoji overlaid instead of plain text. nil for normal
+    /// messages. Defaulted → lightweight SwiftData migration for old stores.
+    var reactionEmoji: String? = nil
+    /// The clip a reaction message targets, so the thread can show a live
+    /// preview of the exact log that was reacted to. Optional to-one; nil on
+    /// plain messages. No explicit inverse — a clip doesn't need to know which
+    /// messages reference it.
+    var reactedClip: Clip? = nil
 
     init(chat: Chat?, author: Friend?, text: String, sentAt: Date = .now, sharedSpotName: String? = nil) {
         self.id = UUID()
@@ -261,6 +283,18 @@ final class Message {
         self.sentAt = sentAt
         self.sharedSpotName = sharedSpotName
     }
+
+    /// A reaction broadcast: the friend's clip preview stamped with `emoji`,
+    /// posted into the thread so a reaction shows up as chat context too.
+    static func reaction(_ emoji: String, to clip: Clip, from author: Friend?, in chat: Chat?) -> Message {
+        let message = Message(chat: chat, author: author, text: "")
+        message.reactionEmoji = emoji
+        message.reactedClip = clip
+        return message
+    }
+
+    /// True when this message is a reaction broadcast rather than plain text.
+    var isReaction: Bool { reactionEmoji != nil }
 }
 
 @Model

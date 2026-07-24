@@ -67,10 +67,9 @@ struct AuthGateView: View {
             GlassBackground()
             VStack(spacing: 18) {
                 RalliWordmark(size: 40)
-                ProgressView().tint(Theme.gold)
+                ProgressView().tint(Theme.iris)
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     /// Decides between onboarding and the app. A lookup failure (offline) is
@@ -165,7 +164,7 @@ struct WelcomeView: View {
                     .padding(.horizontal, 28)
             }
 
-            GoldButton(title: mode == .signUp ? "Create account" : "Log in",
+            PrimaryButton(title: mode == .signUp ? "Create account" : "Log in",
                        busy: busy, enabled: canSubmit, action: submit)
                 .padding(.horizontal, 28)
                 .padding(.top, 18)
@@ -174,22 +173,17 @@ struct WelcomeView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Onboarding has no content of its own, so the glass would sit on a
-        // flat void. A warm gold bloom behind the panes gives it something
-        // to refract.
+        // Onboarding has no content of its own, so a soft iris bloom behind the
+        // warm canvas gives the hero some warmth without competing with the copy.
         .background {
             ZStack {
                 Theme.appBackground
-                RadialGradient(colors: [Theme.goldGlow.opacity(0.18), .clear],
+                RadialGradient(colors: [Theme.iris.opacity(0.10), .clear],
                                center: .init(x: 0.5, y: 0.22),
                                startRadius: 0, endRadius: 380)
-                RadialGradient(colors: [Theme.goldDeep.opacity(0.14), .clear],
-                               center: .init(x: 0.15, y: 0.85),
-                               startRadius: 0, endRadius: 300)
             }
             .ignoresSafeArea()
         }
-        .preferredColorScheme(.dark)
 #if DEBUG
         // CLI verification hook: SIMCTL_CHILD_EXPLOG_AUTO_AUTH="signup|login:email:password:Name"
         .task {

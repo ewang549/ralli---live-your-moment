@@ -1,6 +1,28 @@
 import SwiftUI
 import SwiftData
 
+// MARK: - Layout safety
+
+/// Clamps a dimension derived from a `GeometryReader` so it can never be passed
+/// to `.frame(width:height:)` as a negative, zero, or non-finite value — the
+/// exact inputs that trigger SwiftUI's "invalid frame dimension" runtime error.
+/// During a full-screen cover's present/dismiss transition `proxy.size` can
+/// momentarily read 0, so every geometry-driven frame in this file routes
+/// through this.
+extension CGFloat {
+    var safeDimension: CGFloat { (isFinite && self > 0) ? self : 1 }
+}
+
+/// One place that defines what a "video container" is, so every feed renders
+/// clips in identically-proportioned cards (per the uniform-sizing rule).
+enum VideoCard {
+    /// Portrait 9:16 — the aspect every clip container is normalized to.
+    static let aspectRatio: CGFloat = 9.0 / 16.0
+    static let cornerRadius: CGFloat = 24
+    /// How many equal cards the continuous group feed fits per screen height.
+    static let groupVisibleCount: CGFloat = 3
+}
+
 // MARK: - Shared clip pane
 //
 // One full-bleed clip with its caption overlaid. This is the unit every stacked
@@ -37,12 +59,17 @@ struct StackedClipPane: View {
             LinearGradient(colors: [.black.opacity(0.5), .clear, .black.opacity(0.55)],
                            startPoint: .top, endPoint: .bottom)
 
-            VStack {
+            VStack(alignment: .leading, spacing: 8) {
                 header
                     .padding(.top, headerTopPadding)
                 Spacer()
                 if let caption = clip?.label, !caption.isEmpty {
                     captionOverlay(caption)
+                }
+                // Reaction badges sit at the container's bottom-left, beneath
+                // the caption — where a friend's reactions land on their log.
+                if let reactions = clip?.reactions, !reactions.isEmpty {
+                    reactionBadges(reactions)
                 }
             }
             .padding(14)
@@ -51,9 +78,32 @@ struct StackedClipPane: View {
         .contentShape(Rectangle())
     }
 
+    /// De-duplicated reaction chips (emoji + count) pinned bottom-left.
+    private func reactionBadges(_ reactions: [Reaction]) -> some View {
+        // Group identical emoji so "❤️❤️🔥" reads as "❤️ 2  🔥 1".
+        let counts = reactions.reduce(into: [String: Int]()) { $0[$1.emoji, default: 0] += 1 }
+        return HStack(spacing: 6) {
+            ForEach(counts.keys.sorted(), id: \.self) { emoji in
+                HStack(spacing: 3) {
+                    Text(emoji).font(.system(size: 15))
+                    if let count = counts[emoji], count > 1 {
+                        Text("\(count)")
+                            .font(.system(size: 12, weight: .bold, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.white)
+                    }
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(.black.opacity(0.5)))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
+            }
+        }
+        .transition(.scale(scale: 0.6, anchor: .bottomLeading).combined(with: .opacity))
+    }
+
     private var header: some View {
         HStack(spacing: 9) {
-            // Gold ring marks the author who actually posted this slot.
+            // Iris ring marks the author who actually posted this slot.
             GlassOrbAvatar(emoji: authorEmoji, hue: authorHue, size: 32,
                            isActive: clip != nil)
             VStack(alignment: .leading, spacing: 1) {
@@ -73,12 +123,12 @@ struct StackedClipPane: View {
             if let capturedAt = clip?.capturedAt {
                 Text(capturedAt.clockTime)
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Theme.gold)
+                    .foregroundStyle(Theme.iris)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background {
                         Capsule().fill(.ultraThinMaterial)
-                            .overlay { Capsule().strokeBorder(Theme.gold.opacity(0.3), lineWidth: 1) }
+                            .overlay { Capsule().strokeBorder(Theme.iris.opacity(0.3), lineWidth: 1) }
                     }
             }
         }
@@ -111,15 +161,15 @@ struct StackedClipPane: View {
     }
 }
 
-// MARK: - A. 1-on-1 split stack with vertical paging
+// MARK: - A. 1-on-1 stacked log detail with vertical paging
 
-/// Your 2-second clip on top, the friend's underneath, with the whole pair
-/// paging vertically to the next friend — TikTok-style, but each "page" is a
-/// pair rather than a single video.
+/// The friend's 2-second log on top (the larger card, carrying the reply +
+/// reaction overlay), your own underneath (the smaller card), with the whole
+/// pair paging vertically to the next friend.
 ///
-/// Your clip and the timestamp banner stay put across pages; only the bottom
-/// half swaps as you swipe, which is what makes it read as "same moment, next
-/// person" instead of an unrelated feed.
+/// The two cards are inset rounded panes rather than a flush split, and the
+/// split is deliberately *not* 50/50 — the friend's log is the focus, so it
+/// gets the taller container.
 struct FriendPairFeedView: View {
     let friends: [Friend]
     let me: Friend?
@@ -127,8 +177,11 @@ struct FriendPairFeedView: View {
     var startingFriend: Friend?
 
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \Chat.createdAt) private var chats: [Chat]
     @State private var clock = ClipSyncClock()
     @State private var currentIndex: Int = 0
+    /// The friend thread to open when Reply is tapped on a friend's card.
+    @State private var replyChat: Chat?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -151,8 +204,6 @@ struct FriendPairFeedView: View {
                     }
                     .scrollTargetLayout()
                 }
-                // Pages fill the safe area rather than the raw screen, so a
-                // pane's author chip never lands under the status bar.
                 .scrollTargetBehavior(.paging)
                 .scrollIndicators(.hidden)
                 .scrollPosition(id: Binding(
@@ -170,6 +221,10 @@ struct FriendPairFeedView: View {
             timestampBanner
         }
         .environment(clock)
+        // Reply opens the very same thread engine used everywhere else.
+        .sheet(item: $replyChat) { chat in
+            ChatDrawerView(chat: chat)
+        }
         .task {
             if let startingFriend, let index = friends.firstIndex(where: { $0.id == startingFriend.id }) {
                 currentIndex = index
@@ -180,32 +235,72 @@ struct FriendPairFeedView: View {
         .preferredColorScheme(.dark)
     }
 
-    /// One page: two vertically stacked panes splitting the screen evenly.
+    /// One page: the friend's card on top (with actions), yours below —
+    /// identically sized per the uniform video-sizing rule.
     private func pairPage(for friend: Friend, height: CGFloat) -> some View {
-        VStack(spacing: 2) {
-            // Top half — you. Stays conceptually fixed across pages.
-            StackedClipPane(
-                clip: me?.latestClip,
-                authorName: me?.name ?? "You",
-                authorEmoji: me?.emoji ?? "🙂",
-                authorHue: me?.hue ?? 0.58,
-                roleLabel: "you",
-                // Clears the floating timestamp banner above it.
-                headerTopPadding: 96
-            )
-            .frame(height: (height - 2) / 2)
+        // Insets carve the pair out of the screen: the top inset clears the
+        // floating timestamp banner, and the cards leave a margin all round.
+        let topInset: CGFloat = 92
+        let bottomInset: CGFloat = 22
+        let gap: CGFloat = 10
+        // Uniform sizing: both containers get exactly half the usable height,
+        // so your clip and the friend's clip render at identical dimensions.
+        // Clamped so a transient 0-height geometry pass can't emit a negative
+        // frame ("invalid frame dimension").
+        let usable = height - topInset - bottomInset - gap
+        let cardHeight = (usable / 2).safeDimension
 
-            // Bottom half — the friend this page belongs to.
-            StackedClipPane(
-                clip: friend.latestClip,
-                authorName: friend.name,
-                authorEmoji: friend.emoji,
-                authorHue: friend.hue,
-                roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId
-            )
-            .frame(height: (height - 2) / 2)
+        return VStack(spacing: gap) {
+            // Top — the friend's log, carrying the reaction + reply overlay.
+            logCard {
+                StackedClipPane(
+                    clip: friend.latestClip,
+                    authorName: friend.name,
+                    authorEmoji: friend.emoji,
+                    authorHue: friend.hue,
+                    roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId
+                )
+            }
+            .frame(height: cardHeight)
+            .overlay(alignment: .bottomTrailing) {
+                FriendLogActions(clip: friend.latestClip, me: me, chat: chat(with: friend)) {
+                    replyChat = chat(with: friend)
+                }
+                .padding(16)
+            }
+
+            // Bottom — your own log: the identical container.
+            logCard {
+                StackedClipPane(
+                    clip: me?.latestClip,
+                    authorName: me?.name ?? "You",
+                    authorEmoji: me?.emoji ?? "🙂",
+                    authorHue: me?.hue ?? 0.58,
+                    roleLabel: "you"
+                )
+            }
+            .frame(height: cardHeight)
         }
-        .frame(height: height)
+        .padding(.horizontal, 12)
+        .padding(.top, topInset)
+        .padding(.bottom, bottomInset)
+        .frame(height: height.safeDimension)
+    }
+
+    /// Rounded, hairline-ringed container shared by both panes.
+    private func logCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+            )
+    }
+
+    /// The 1-on-1 thread with this friend (falls back to any shared chat).
+    private func chat(with friend: Friend) -> Chat? {
+        chats.first { !$0.isGroup && $0.members.contains { $0.id == friend.id } }
+            ?? chats.first { $0.members.contains { $0.id == friend.id } }
     }
 
     /// Synchronized timestamp banner, pinned above both panes.
@@ -236,17 +331,167 @@ struct FriendPairFeedView: View {
     }
 }
 
+// MARK: - Friend log action overlay (reply + emoji reaction)
+
+/// The two vertically-stacked actions on the bottom-right of a friend's log
+/// card: emoji reaction on top, reply beneath it (per the reference).
+///
+/// Reaction gestures are isolated so they never fight the paging swipe or a
+/// tap: the button's own action opens the full picker, and a `.simultaneous`
+/// long-press reveals the 5-emoji quick tray.
+private struct FriendLogActions: View {
+    let clip: Clip?
+    let me: Friend?
+    /// Thread this friend's log belongs to; a reaction is broadcast here so it
+    /// also lands in the chat as a message. nil → badge-only (no thread).
+    var chat: Chat?
+    let onReply: () -> Void
+
+    @Environment(\.modelContext) private var modelContext
+    @State private var showQuickTray = false
+    @State private var showEmojiPicker = false
+
+    /// The 5 popular reactions in the quick tray.
+    private let quickEmoji = ["❤️", "🔥", "😂", "😮", "👏"]
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 12) {
+            // Quick-reaction tray — revealed by long-pressing the react button.
+            if showQuickTray {
+                HStack(spacing: 14) {
+                    ForEach(quickEmoji, id: \.self) { emoji in
+                        Button { react(with: emoji) } label: {
+                            Text(emoji).font(.system(size: 26))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(.black.opacity(0.55)))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
+                .transition(.scale(scale: 0.6, anchor: .bottomTrailing).combined(with: .opacity))
+            }
+
+            // Emoji reaction: tap → full picker, long-press → quick tray.
+            actionButton(system: "face.smiling.inverse") {
+                showEmojiPicker = true
+            }
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.3).onEnded { _ in
+                    withAnimation(.spring(duration: 0.3)) { showQuickTray.toggle() }
+                }
+            )
+
+            // Reply: opens the message thread with this friend.
+            actionButton(system: "arrowshape.turn.up.left.fill", action: onReply)
+        }
+        .sheet(isPresented: $showEmojiPicker) {
+            EmojiReactionPicker { emoji in
+                react(with: emoji)
+                showEmojiPicker = false
+            }
+        }
+    }
+
+    private func actionButton(system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 46, height: 46)
+                .background {
+                    Circle().fill(.black.opacity(0.4))
+                        .overlay(Circle().strokeBorder(.white.opacity(0.14), lineWidth: 1))
+                }
+                .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func react(with emoji: String) {
+        guard let clip else { return }
+        let mine = Reaction(emoji: emoji, authorName: me?.name ?? "Ethan")
+        // Toggle: tapping the same reaction again removes it.
+        withAnimation(.spring(duration: 0.3)) {
+            if let index = clip.reactions.firstIndex(of: mine) {
+                clip.reactions.remove(at: index)
+            } else {
+                clip.reactions.append(mine)
+                // Broadcast the reaction into the chat thread — the same
+                // reaction shows up as a message overlaying this clip's
+                // preview. Only on add, so removing a reaction doesn't post.
+                if let chat {
+                    let message = Message.reaction(emoji, to: clip, from: me, in: chat)
+                    modelContext.insert(message)
+                    chat.messages.append(message)
+                }
+            }
+        }
+        try? modelContext.save()
+        withAnimation(.spring(duration: 0.3)) { showQuickTray = false }
+    }
+}
+
+// MARK: - Full emoji picker
+
+/// A scrollable grid of reactions, presented when the emoji button is tapped.
+/// Deliberately broad so "any emoji" is a reasonable claim without pulling in
+/// a full system keyboard.
+struct EmojiReactionPicker: View {
+    let onPick: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    private let emojis: [String] = [
+        "❤️", "🔥", "😂", "😮", "👏", "🥰", "😍", "🤩", "😭", "🥺", "😅", "😎",
+        "🙌", "👍", "👎", "🙏", "💯", "✨", "🎉", "😳", "🤔", "😴", "🤯", "😤",
+        "🥳", "😱", "🫶", "💀", "👀", "😇", "🤗", "😆", "😉", "😜", "🤪", "😏",
+    ]
+    private let columns = Array(repeating: GridItem(.flexible()), count: 6)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("React")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.top, 18)
+                .padding(.bottom, 8)
+
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 16) {
+                    ForEach(emojis, id: \.self) { emoji in
+                        Button { onPick(emoji) } label: {
+                            Text(emoji).font(.system(size: 32))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(20)
+            }
+        }
+        .background(GlassBackground())
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
+    }
+}
+
 // MARK: - B. Group chat video feed
 
-/// Every member's current 2-second clip, one clip per full screen, paging
-/// vertically. One member fills the screen at a time — you never see the edge
-/// of the next or previous clip while at rest.
+/// Every member's current 2-second clip in one continuous vertical scroll —
+/// about three equal-sized cards to a screen, scrolling smoothly like a long
+/// sheet (no page snapping). Every card is the same width, height, and aspect
+/// ratio, so no member's clip renders larger than another's.
 struct GroupClipFeedView: View {
     let chat: Chat
 
     @Environment(\.dismiss) private var dismiss
     @State private var clock = ClipSyncClock()
-    @State private var currentIndex: Int = 0
+    /// Thread to open when Reply is tapped — the group's own chat.
+    @State private var replyChat: Chat?
+
+    private var me: Friend? { chat.members.first { $0.isMe } }
 
     /// One clip per member, most recent first, skipping members with nothing.
     private var entries: [(friend: Friend, clip: Clip?)] {
@@ -256,59 +501,83 @@ struct GroupClipFeedView: View {
         .sorted { ($0.clip?.capturedAt ?? .distantPast) > ($1.clip?.capturedAt ?? .distantPast) }
     }
 
+    private let cardSpacing: CGFloat = 12
+
     var body: some View {
         ZStack(alignment: .top) {
             Theme.base.ignoresSafeArea()
 
             GeometryReader { proxy in
+                // Height that fits `groupVisibleCount` equal cards plus the gaps
+                // between them. Clamped so a transient 0-height layout pass can
+                // never emit a negative/zero frame.
+                let count = VideoCard.groupVisibleCount
+                let totalGaps = cardSpacing * (count - 1)
+                let cardHeight = ((proxy.size.height - totalGaps) / count).safeDimension
+                let cardWidth = (proxy.size.width - 24).safeDimension
+
+                // Continuous scroll — no `.scrollTargetBehavior(.paging)`, so it
+                // glides rather than snapping one clip at a time.
                 ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(entries.enumerated()), id: \.element.friend.id) { index, entry in
-                            StackedClipPane(
-                                clip: entry.clip,
-                                authorName: entry.friend.name,
-                                authorEmoji: entry.friend.emoji,
-                                authorHue: entry.friend.hue,
-                                roleLabel: entry.friend.isMe ? "you" : nil,
-                                // Clears the floating title bar above.
-                                headerTopPadding: 96
-                            )
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
-                                view
-                                    .opacity(phase.isIdentity ? 1 : 0.5)
-                                    .scaleEffect(phase.isIdentity ? 1 : 0.93)
-                            }
-                            .id(index)
+                    LazyVStack(spacing: cardSpacing) {
+                        // Top spacer clears the floating title bar so the first
+                        // card starts below it.
+                        Color.clear.frame(height: 74)
+
+                        ForEach(Array(entries.enumerated()), id: \.element.friend.id) { _, entry in
+                            groupCard(entry: entry, width: cardWidth, height: cardHeight)
                         }
                     }
-                    .scrollTargetLayout()
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 24)
                 }
-                // One clip per swipe, snapped — no peek at the neighbours.
-                .scrollTargetBehavior(.paging)
                 .scrollIndicators(.hidden)
-                .scrollPosition(id: syncedIndex)
             }
             .ignoresSafeArea()
 
             header
         }
         .environment(clock)
+        .sheet(item: $replyChat) { chat in
+            ChatDrawerView(chat: chat)
+        }
         .task { clock.start() }
         .onDisappear { clock.stop() }
         .preferredColorScheme(.dark)
     }
 
-    /// Restarts every clip together whenever a swipe lands on a new page.
-    private var syncedIndex: Binding<Int?> {
-        Binding(
-            get: { currentIndex },
-            set: { newValue in
-                guard let newValue, newValue != currentIndex else { return }
-                currentIndex = newValue
-                clock.resync()
+    /// One uniform member card. A friend's card carries the reaction + reply
+    /// overlay; your own card doesn't (you don't react to yourself).
+    @ViewBuilder
+    private func groupCard(entry: (friend: Friend, clip: Clip?), width: CGFloat, height: CGFloat) -> some View {
+        logCard {
+            StackedClipPane(
+                clip: entry.clip,
+                authorName: entry.friend.name,
+                authorEmoji: entry.friend.emoji,
+                authorHue: entry.friend.hue,
+                roleLabel: entry.friend.isMe ? "you" : nil
+            )
+        }
+        .frame(width: width, height: height)
+        .overlay(alignment: .bottomTrailing) {
+            if !entry.friend.isMe {
+                FriendLogActions(clip: entry.clip, me: me, chat: chat) {
+                    replyChat = chat
+                }
+                .padding(14)
             }
-        )
+        }
+    }
+
+    /// Rounded, hairline-ringed container — matches the 1-on-1 feed's card.
+    private func logCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .clipShape(RoundedRectangle(cornerRadius: VideoCard.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: VideoCard.cornerRadius, style: .continuous)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+            )
     }
 
     private var header: some View {
@@ -364,7 +633,8 @@ struct AllFriendsFeedView: View {
                                 roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId,
                                 headerTopPadding: 96
                             )
-                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .frame(width: proxy.size.width.safeDimension,
+                                   height: proxy.size.height.safeDimension)
                             .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
                                 view
                                     .opacity(phase.isIdentity ? 1 : 0.5)

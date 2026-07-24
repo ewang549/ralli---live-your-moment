@@ -53,7 +53,7 @@ struct ProfileSetupView: View {
                             .padding(.horizontal, 4)
                     }
 
-                    GoldButton(title: "Claim @\(handle.isEmpty ? "handle" : handle)",
+                    PrimaryButton(title: "Claim @\(handle.isEmpty ? "handle" : handle)",
                                busy: busy,
                                enabled: canSubmit) {
                         submit()
@@ -72,7 +72,6 @@ struct ProfileSetupView: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .preferredColorScheme(.dark)
 #if DEBUG
         // CLI verification hook:
         //   SIMCTL_CHILD_EXPLOG_AUTO_PROFILE="handle:Name:City"
@@ -120,13 +119,12 @@ struct ProfileSetupView: View {
                                     .frame(width: 42, height: 42)
                                     .background {
                                         Circle().fill(avatar == option
-                                                      ? Theme.gold.opacity(0.22)
-                                                      : Color.white.opacity(0.06))
+                                                      ? Theme.irisWash : Theme.sunken)
                                     }
                                     .overlay {
                                         Circle().strokeBorder(
-                                            avatar == option ? Theme.gold.opacity(0.7) : .clear,
-                                            lineWidth: 1
+                                            avatar == option ? Theme.iris : .clear,
+                                            lineWidth: 1.5
                                         )
                                     }
                             }
@@ -140,7 +138,7 @@ struct ProfileSetupView: View {
                     HStack(spacing: 8) {
                         Text("@")
                             .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.gold)
+                            .foregroundStyle(Theme.iris)
                         TextField("handle", text: $handle)
                             .font(.system(size: 18, weight: .semibold, design: .rounded))
                             .foregroundStyle(Theme.textPrimary)
@@ -155,11 +153,7 @@ struct ProfileSetupView: View {
                     .padding(.vertical, 14)
                     .background {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color.white.opacity(0.05))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .strokeBorder(.white.opacity(0.1), lineWidth: 1)
-                            }
+                            .fill(Theme.sunken)
                     }
 
                     Text(availabilityMessage)
@@ -188,7 +182,7 @@ struct ProfileSetupView: View {
         case .checking:
             ProgressView().tint(Theme.textSecondary).scaleEffect(0.8)
         case .available:
-            GlowDot(size: 10)
+            GlowDot(size: 10, color: Theme.mint)
         case .taken:
             Image(systemName: "xmark.circle.fill")
                 .foregroundStyle(.red.opacity(0.85))
@@ -208,7 +202,7 @@ struct ProfileSetupView: View {
 
     private var availabilityColor: Color {
         switch availability {
-        case .available: Theme.gold
+        case .available: Theme.mint
         case .taken: .red.opacity(0.85)
         default: Theme.textSecondary
         }

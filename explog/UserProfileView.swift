@@ -54,15 +54,15 @@ struct UserProfileView: View {
                 reloadProfile()
             } label: {
                 if isRecovering {
-                    ProgressView().tint(.black)
+                    ProgressView().tint(Theme.onIris)
                 } else {
                     Text("Reload profile").font(.subheadline.weight(.semibold))
                 }
             }
-            .foregroundStyle(.black)
+            .foregroundStyle(Theme.onIris)
             .padding(.horizontal, 22)
             .padding(.vertical, 11)
-            .background(Capsule().fill(Theme.gold))
+            .background(Capsule().fill(Theme.iris))
             .disabled(isRecovering)
 
 #if DEBUG
@@ -133,15 +133,12 @@ struct UserProfileView: View {
                                         .padding(7)
                                         .background {
                                             Circle()
-                                                .fill(.ultraThinMaterial)
+                                                .fill(isOn ? Theme.irisWash : Theme.sunken)
                                                 .overlay {
                                                     Circle().strokeBorder(
-                                                        isOn ? AnyShapeStyle(Theme.goldRim)
-                                                             : AnyShapeStyle(Theme.glassRimTop.opacity(0.3)),
-                                                        lineWidth: isOn ? 1.5 : 1)
+                                                        isOn ? Theme.iris : Color.clear,
+                                                        lineWidth: 1.5)
                                                 }
-                                                .shadow(color: isOn ? Theme.goldGlow.opacity(0.5) : .clear,
-                                                        radius: 8)
                                         }
                                 }
                             }
@@ -164,16 +161,16 @@ struct UserProfileView: View {
                                 .foregroundStyle(Theme.textSecondary)
                         }
                     }
-                    .tint(Theme.gold)
+                    .tint(Theme.iris)
                 }
                 .padding(14)
                 .background {
                     GlassCard(cornerRadius: 16) { Color.clear }
-                        // Public profiles carry a gold edge — the setting is
+                        // Public profiles carry an iris edge — the setting is
                         // legible without reading the label.
                         .overlay {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(me.isPrivate ? Color.clear : Theme.gold.opacity(0.4),
+                                .strokeBorder(me.isPrivate ? Color.clear : Theme.iris.opacity(0.5),
                                               lineWidth: 1)
                         }
                 }
@@ -271,7 +268,7 @@ struct UserProfileView: View {
                     Label(demoLoaded ? "Demo data loaded" : "Load demo data",
                           systemImage: demoLoaded ? "checkmark.circle.fill" : "wand.and.stars")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(demoLoaded ? Theme.gold : Theme.textPrimary)
+                        .foregroundStyle(demoLoaded ? Theme.iris : Theme.textPrimary)
                 }
                 .disabled(demoLoaded)
 
@@ -354,15 +351,13 @@ struct FlowChips: View {
                 } label: {
                     Text(tag)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(isOn ? .black : Theme.textPrimary)
+                        .foregroundStyle(isOn ? Theme.onIris : Theme.textSecondary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
                         .frame(maxWidth: .infinity)
                         .background {
                             Capsule()
-                                .fill(isOn ? AnyShapeStyle(Theme.goldSheen) : AnyShapeStyle(Material.ultraThinMaterial))
-                                .overlay { Capsule().strokeBorder(Theme.glassRimTop.opacity(isOn ? 0 : 0.35), lineWidth: 1) }
-                                .shadow(color: isOn ? Theme.goldGlow.opacity(0.4) : .clear, radius: 8)
+                                .fill(isOn ? AnyShapeStyle(Theme.iris) : AnyShapeStyle(Theme.sunken))
                         }
                 }
             }
@@ -412,8 +407,8 @@ struct PublicProfileSheet: View {
                                 .font(.caption.weight(.semibold))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
-                                .background { Capsule().fill(.ultraThinMaterial).overlay { Capsule().strokeBorder(Theme.glassRimTop.opacity(0.3), lineWidth: 1) } }
-                                .foregroundStyle(Theme.textPrimary)
+                                .background { Capsule().fill(Theme.sunken) }
+                                .foregroundStyle(Theme.textSecondary)
                         }
                     }
                 }
@@ -424,6 +419,5 @@ struct PublicProfileSheet: View {
         .background(GlassBackground())
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.dark)
     }
 }

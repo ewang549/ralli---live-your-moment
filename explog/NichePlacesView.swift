@@ -3,28 +3,14 @@ import SwiftData
 
 // MARK: - View A: Niche Places feed
 //
-// The gold showcase. A snapping full-screen vertical media feed: the clip is
+// The iris showcase. A snapping full-screen vertical media feed: the clip is
 // the backdrop, edge to edge, and everything else floats over it as glass and
-// gold — the right-hand action rail, the orb avatar with its gold ring, the
+// iris — the right-hand action rail, the orb avatar with its iris ring, the
 // follow chip, and the sequence scrubber marking your place in the spot's set.
 
 struct NichePlacesView: View {
     @Query(sort: \SpotClip.capturedAt, order: .reverse) private var clips: [SpotClip]
     @State private var visibleClipID: UUID?
-
-    /// Where the visible clip sits inside its own spot's set — what the scrubber
-    /// is counting. Falls back to the whole feed when a clip has no spot.
-    private var sequence: (index: Int, count: Int) {
-        guard let visibleClipID, let clip = clips.first(where: { $0.id == visibleClipID })
-        else { return (0, max(clips.count, 1)) }
-        let set = (clip.spot?.perspectives ?? [])
-            .sorted { $0.capturedAt > $1.capturedAt }
-        guard let position = set.firstIndex(where: { $0.id == clip.id }) else {
-            let feedIndex = clips.firstIndex(where: { $0.id == clip.id }) ?? 0
-            return (feedIndex, clips.count)
-        }
-        return (position, set.count)
-    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -53,37 +39,37 @@ struct NichePlacesView: View {
             .overlay(alignment: .top) { topChrome }
         }
         .ignoresSafeArea()
-        .background(GlassBackground())
+        .background(Color.black)
+        // Places is the immersive media tab — it stays dark whatever the system
+        // theme, so the glass chrome floats over full-bleed video correctly.
+        .preferredColorScheme(.dark)
         .onAppear { if visibleClipID == nil { visibleClipID = clips.first?.id } }
     }
 
-    /// Floating header: the wordmark plus the sequence scrubber, over a scrim
-    /// short enough that the media still runs to the top edge.
+    /// Floating header: just the wordmark and the live "nearby" pill. The
+    /// per-spot sequence scrubber that used to sit under the logo has been
+    /// removed so the media feed anchors straight below the Ralli header.
     private var topChrome: some View {
-        VStack(spacing: 10) {
-            HStack {
-                RalliWordmark(size: 24)
-                Spacer()
-                HStack(spacing: 6) {
-                    GlowDot(size: 7, breathing: true)
-                    Text("NEARBY NOW")
-                        .font(.system(size: 10, weight: .heavy, design: .rounded))
-                        .kerning(1.1)
-                        .foregroundStyle(Theme.textPrimary.opacity(0.85))
-                }
-                .padding(.horizontal, 11)
-                .padding(.vertical, 6)
-                .background {
-                    Capsule().fill(.ultraThinMaterial)
-                        .overlay { Capsule().strokeBorder(Theme.gold.opacity(0.35), lineWidth: 1) }
-                }
+        HStack {
+            RalliWordmark(size: 24)
+            Spacer()
+            HStack(spacing: 6) {
+                GlowDot(size: 7, breathing: true)
+                Text("NEARBY NOW")
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .kerning(1.1)
+                    .foregroundStyle(Theme.textPrimary.opacity(0.85))
             }
-
-            SequenceScrubber(count: sequence.count, index: sequence.index)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background {
+                Capsule().fill(.ultraThinMaterial)
+                    .overlay { Capsule().strokeBorder(Theme.iris.opacity(0.35), lineWidth: 1) }
+            }
         }
         .padding(.horizontal, 18)
         .padding(.top, 60)
-        .padding(.bottom, 14)
+        .padding(.bottom, 12)
         .background {
             LinearGradient(colors: [.black.opacity(0.55), .clear],
                            startPoint: .top, endPoint: .bottom)
@@ -144,18 +130,19 @@ private struct PlacePage: View {
 
     private var actionRail: some View {
         VStack(spacing: 18) {
-            GoldRailButton(icon: "heart", activeIcon: "heart.fill",
-                           count: clip.likeCount, isActive: clip.likedByMe) {
+            RailButton(icon: "heart", activeIcon: "heart.fill",
+                           count: clip.likeCount, isActive: clip.likedByMe,
+                           activeTint: Theme.coral) {
                 toggleLike()
             }
-            GoldRailButton(icon: "bubble.right", activeIcon: "bubble.right.fill",
+            RailButton(icon: "bubble.right", activeIcon: "bubble.right.fill",
                            count: clip.comments.count) {
                 showComments = true
             }
-            GoldRailButton(icon: "paperplane", activeIcon: "paperplane.fill") {
+            RailButton(icon: "paperplane", activeIcon: "paperplane.fill") {
                 showShare = true
             }
-            GoldRailButton(icon: "bookmark", activeIcon: "bookmark.fill",
+            RailButton(icon: "bookmark", activeIcon: "bookmark.fill",
                            isActive: clip.savedByMe) {
                 clip.savedByMe.toggle()
                 try? modelContext.save()
@@ -168,7 +155,7 @@ private struct PlacePage: View {
     private var attribution: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                // Gold ring: this clip's author, lit against the media.
+                // Iris ring: this clip's author, lit against the media.
                 GlassOrbAvatar(emoji: clip.emoji, hue: clip.hueA, size: 42, isActive: true)
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -180,7 +167,7 @@ private struct PlacePage: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
 
-                GoldChip(title: isFollowing ? "Following" : "Follow",
+                AccentChip(title: isFollowing ? "Following" : "Follow",
                          systemImage: isFollowing ? "checkmark" : "plus",
                          isFilled: isFollowing) {
                     isFollowing.toggle()
@@ -201,7 +188,7 @@ private struct PlacePage: View {
                         HStack(spacing: 6) {
                             Image(systemName: "mappin.circle.fill")
                                 .font(.system(size: 13))
-                                .foregroundStyle(Theme.gold)
+                                .foregroundStyle(Theme.iris)
                             Text(spot.name)
                                 .font(.system(size: 14, weight: .bold, design: .rounded))
                                 .foregroundStyle(Theme.textPrimary)
@@ -230,7 +217,7 @@ private struct PlacePage: View {
             } label: {
                 Text(captionExpanded ? "See less" : "See more")
                     .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.goldSoft)
+                    .foregroundStyle(Theme.irisSoft)
             }
             .buttonStyle(.plain)
         }
@@ -363,7 +350,7 @@ struct SharePlaceSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "dot.radiowaves.left.and.right")
-                                .foregroundStyle(beaconPosted ? .green : Theme.gold)
+                                .foregroundStyle(beaconPosted ? .green : Theme.iris)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(beaconPosted ? "Beacon posted" : "Post as public beacon")
                                     .font(.subheadline.weight(.semibold))
@@ -382,7 +369,7 @@ struct SharePlaceSheet: View {
                             GlassCard(cornerRadius: 14) { Color.clear }
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                        .strokeBorder(Theme.gold.opacity(0.45), lineWidth: 1)
+                                        .strokeBorder(Theme.iris.opacity(0.45), lineWidth: 1)
                                 }
                         }
                     }
@@ -427,7 +414,7 @@ struct SharePlaceSheet: View {
                                 .foregroundStyle(.green)
                         } else {
                             Image(systemName: "paperplane")
-                                .foregroundStyle(Theme.gold)
+                                .foregroundStyle(Theme.iris)
                         }
                     }
                     .padding(14)
@@ -442,6 +429,8 @@ struct SharePlaceSheet: View {
         let message = Message(chat: chat, author: me,
                               text: "check this spot out 👀",
                               sharedSpotName: spotName)
+        // Carry the real spot so the chat card can open its detail sheet.
+        message.sharedSpot = clip.spot
         modelContext.insert(message)
         chat.messages.append(message)
         try? modelContext.save()
@@ -496,7 +485,7 @@ struct SpotDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Insight", systemImage: "sparkles")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.gold)
+                            .foregroundStyle(Theme.iris)
                         Text(spot.aiInsight)
                             .font(.subheadline)
                             .foregroundStyle(Theme.textPrimary.opacity(0.85))
@@ -538,10 +527,10 @@ struct SpotDetailView: View {
                     } label: {
                         Label("Share this spot", systemImage: "paperplane.fill")
                             .font(.headline)
-                            .foregroundStyle(.black)
+                            .foregroundStyle(Theme.onIris)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(Capsule().fill(Theme.gold))
+                            .background(Capsule().fill(Theme.iris))
                     }
                     .padding(.top, 6)
                 }

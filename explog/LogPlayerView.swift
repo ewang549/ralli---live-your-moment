@@ -177,7 +177,7 @@ private struct LogOverlay: View {
                 if chat.streak > 0 {
                     Text("🔥 \(chat.streak)")
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(Theme.gold)
+                        .foregroundStyle(Theme.iris)
                 }
             }
             if clipIndex == 0 && clipCount > 1 {
@@ -227,7 +227,7 @@ struct ReactionRail: View {
             } label: {
                 Image(systemName: myReactionCount > 0 ? "heart.fill" : "heart")
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(myReactionCount > 0 ? Theme.gold : .white)
+                    .foregroundStyle(myReactionCount > 0 ? Theme.coral : .white)
                     .shadow(radius: 4)
             }
             .simultaneousGesture(
@@ -239,9 +239,7 @@ struct ReactionRail: View {
             Button {
                 showChat = true
             } label: {
-                Image(systemName: "bubble.right.fill")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(.white)
+                ChatGlyph(size: 25, color: .white)
                     .shadow(radius: 4)
             }
         }
@@ -318,7 +316,7 @@ private struct GroupLogPage: View {
                 HStack(spacing: 4) {
                     ForEach(0..<latestPerMember.count, id: \.self) { index in
                         Capsule()
-                            .fill(index <= reelIndex ? Theme.gold : .white.opacity(0.3))
+                            .fill(index <= reelIndex ? Theme.iris : .white.opacity(0.3))
                             .frame(height: 3)
                     }
                 }
@@ -329,7 +327,7 @@ private struct GroupLogPage: View {
                     .foregroundStyle(.white)
                 Text("🔥 \(chat.streak)")
                     .font(.subheadline.weight(.bold))
-                    .foregroundStyle(Theme.gold)
+                    .foregroundStyle(Theme.iris)
                 Spacer()
                 Picker("Mode", selection: $mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }

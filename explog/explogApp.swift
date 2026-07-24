@@ -1,13 +1,56 @@
 import SwiftUI
 import SwiftData
+import UIKit
 import FirebaseCore
 import FirebaseAuth
 import StreamChat
 import StreamChatSwiftUI
 
+/// Runtime-switchable interface-orientation policy.
+///
+/// The app ships iPhone-portrait-only (see `INFOPLIST_KEY_UISupportedInterface`
+/// `Orientations_iPhone` in the project settings), but video in Ralli is always
+/// shot horizontally — so the camera capture screen forces the interface into
+/// landscape and locks it there. `AppDelegate` reports the current mask from
+/// `application(_:supportedInterfaceOrientationsFor:)`; the helpers below flip
+/// it and ask the active window scene to re-evaluate and physically rotate.
+enum InterfaceOrientationLock {
+    /// Orientations the app currently permits. Read on the main thread by the
+    /// app delegate; mutated only through `lockLandscape()` / `lockPortrait()`.
+    static var mask: UIInterfaceOrientationMask = .portrait
+
+    /// Force the interface into landscape and hold it there. The system rotates
+    /// to whichever landscape edge matches how the phone is being held.
+    @MainActor static func lockLandscape() { apply(.landscape) }
+
+    /// Return to the app's default portrait and rotate upright, whatever posture
+    /// the phone is in — this is what "restores portrait" on camera exit.
+    @MainActor static func lockPortrait() { apply(.portrait) }
+
+    @MainActor private static func apply(_ newMask: UIInterfaceOrientationMask) {
+        // Update the reported mask FIRST so that when the system re-queries
+        // supported orientations below it already sees the new policy.
+        mask = newMask
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }) else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: newMask)) { _ in }
+        // Nudge the system to re-read `supportedInterfaceOrientationsFor`, so it
+        // doesn't immediately snap the interface back toward the old mask.
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+}
+
 class AppDelegate: NSObject, UIApplicationDelegate {
     // Keep a strong reference — required by the Stream SDK.
     var streamChat: StreamChat?
+
+    /// The whole app is portrait except while the camera capture screen is up,
+    /// which flips `InterfaceOrientationLock.mask` to landscape.
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        InterfaceOrientationLock.mask
+    }
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {

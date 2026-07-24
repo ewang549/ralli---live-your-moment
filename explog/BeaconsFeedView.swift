@@ -35,7 +35,7 @@ struct BeaconsFeedView: View {
             VStack(spacing: 0) {
                 header
 
-                // Friends ↔ Public, as gold filter chips rather than a system
+                // Friends ↔ Public, as iris filter chips rather than a system
                 // segmented control, which can't be tinted to match the rest.
                 HStack(spacing: 8) {
                     ForEach(Segment.allCases, id: \.self) { option in
@@ -115,7 +115,7 @@ struct BeaconsFeedView: View {
                 showMyActivities = true
             }
             // Create a public activity (privacy-guarded) — the primary action.
-            GlassCircleButton(icon: "plus", label: "Create an activity", isGold: true) {
+            GlassCircleButton(icon: "plus", label: "Create an activity", isProminent: true) {
                 if me?.isPrivate == true {
                     showPrivacyAlert = true
                 } else {
@@ -149,7 +149,7 @@ struct BeaconFeedCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 if let host = beacon.host {
-                    // Gold ring on the host's orb — they're the live signal here.
+                    // Iris ring on the host's orb — they're the live signal here.
                     GlassOrbAvatar(friend: host, size: 40, isActive: true)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(host.name)
@@ -161,11 +161,10 @@ struct BeaconFeedCard: View {
                     }
                 } else {
                     ZStack {
-                        Circle().fill(.ultraThinMaterial)
-                            .overlay { Circle().strokeBorder(Theme.gold.opacity(0.35), lineWidth: 1) }
+                        Circle().fill(Theme.irisWash)
                         Image(systemName: "person.3.fill")
                             .font(.caption)
-                            .foregroundStyle(Theme.gold)
+                            .foregroundStyle(Theme.iris)
                     }
                     .frame(width: 40, height: 40)
                     VStack(alignment: .leading, spacing: 1) {
@@ -182,7 +181,7 @@ struct BeaconFeedCard: View {
                     GlowDot(size: 7, breathing: true)
                     Text(beacon.startsAt, style: .relative)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Theme.gold)
+                        .foregroundStyle(Theme.iris)
                 }
             }
 
@@ -211,11 +210,11 @@ struct BeaconFeedCard: View {
                 capacityMeter
                 Spacer(minLength: 4)
                 // "More Details" opens the activity detail sheet.
-                GoldChip(title: "Details", systemImage: "info.circle") {
+                AccentChip(title: "Details", systemImage: "info.circle") {
                     showDetail = true
                 }
-                // Filled gold once you're in — RSVP state reads at a glance.
-                GoldChip(title: joined ? "Going" : (beacon.isFull ? "Full" : "Join"),
+                // Filled iris once you're in — RSVP state reads at a glance.
+                AccentChip(title: joined ? "Going" : (beacon.isFull ? "Full" : "Join"),
                          systemImage: joined ? "checkmark" : nil,
                          isFilled: joined) {
                     attemptJoin()
@@ -240,7 +239,7 @@ struct BeaconFeedCard: View {
         }
     }
 
-    /// Who's in, and how close to full: attendee orbs plus a gold fill bar that
+    /// Who's in, and how close to full: attendee orbs plus a iris fill bar that
     /// runs hot as the last spots go.
     private var capacityMeter: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -250,7 +249,7 @@ struct BeaconFeedCard: View {
                 }
                 Text("\(beacon.joined.count)/\(beacon.capacity)")
                     .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(beacon.isFull ? Theme.gold : Theme.textSecondary)
+                    .foregroundStyle(beacon.isFull ? Theme.iris : Theme.textSecondary)
                     .padding(.leading, 14)
             }
             GeometryReader { proxy in
@@ -258,9 +257,9 @@ struct BeaconFeedCard: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Theme.textPrimary.opacity(0.12))
                     Capsule()
-                        .fill(Theme.goldSheen)
+                        .fill(Theme.irisGradient)
                         .frame(width: proxy.size.width * fraction)
-                        .shadow(color: Theme.goldGlow.opacity(0.5), radius: 5)
+                        .shadow(color: Theme.irisGlow.opacity(0.5), radius: 5)
                 }
             }
             .frame(width: 96, height: 3)
@@ -321,7 +320,7 @@ struct ActivityDetailSheet: View {
                                     .foregroundStyle(Theme.textPrimary)
                                 Text("\(spot.distanceMiles, specifier: "%.1f") mi from you")
                                     .font(.caption)
-                                    .foregroundStyle(Theme.gold)
+                                    .foregroundStyle(Theme.iris)
                             }
                         }
                         if !spot.address.isEmpty {
@@ -335,7 +334,7 @@ struct ActivityDetailSheet: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Label("About this spot", systemImage: "sparkles")
                                 .font(.subheadline.weight(.bold))
-                                .foregroundStyle(Theme.gold)
+                                .foregroundStyle(Theme.iris)
                             Text(spot.aiInsight)
                                 .font(.subheadline)
                                 .foregroundStyle(Theme.textPrimary.opacity(0.85))
@@ -363,7 +362,7 @@ struct ActivityDetailSheet: View {
                                         if friend.id == beacon.host?.id {
                                             Text("host")
                                                 .font(.system(size: 9, weight: .bold))
-                                                .foregroundStyle(Theme.gold)
+                                                .foregroundStyle(Theme.iris)
                                         }
                                     }
                                 }
@@ -382,10 +381,10 @@ struct ActivityDetailSheet: View {
                         Label(attending ? "Open activity group chat" : "Join to unlock group chat",
                               systemImage: "bubble.left.and.bubble.right.fill")
                             .font(.headline)
-                            .foregroundStyle(.black)
+                            .foregroundStyle(Theme.onIris)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(Capsule().fill(Theme.gold))
+                            .background(Capsule().fill(Theme.iris))
                     }
                     .padding(.top, 6)
 
@@ -396,10 +395,10 @@ struct ActivityDetailSheet: View {
                         } label: {
                             Label("Message \(host.name) directly", systemImage: "bubble.left.fill")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Theme.gold)
+                                .foregroundStyle(Theme.iris)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 11)
-                                .background(Capsule().fill(Theme.gold.opacity(0.15)))
+                                .background(Capsule().fill(Theme.iris.opacity(0.15)))
                         }
                     }
                 }
@@ -432,7 +431,6 @@ struct ActivityDetailSheet: View {
         } message: {
             Text("You must set your profile to Public to create or join community activities.")
         }
-        .preferredColorScheme(.dark)
     }
 
     /// Finds the existing 1-on-1 chat with the host, creating one if needed.
@@ -514,7 +512,6 @@ struct ActivityChatView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     private var localThread: some View {
@@ -556,7 +553,7 @@ struct ActivityChatView: View {
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 30))
-                            .foregroundStyle(draft.isEmpty || !canPost ? Theme.textSecondary : Theme.gold)
+                            .foregroundStyle(draft.isEmpty || !canPost ? Theme.textSecondary : Theme.iris)
                     }
                     .disabled(draft.isEmpty || !canPost)
                 }
@@ -630,7 +627,7 @@ struct MyActivitiesSheet: View {
                                 Spacer()
                                 Text("\(beacon.joined.count)/\(beacon.capacity)")
                                     .font(.caption.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(Theme.gold)
+                                    .foregroundStyle(Theme.iris)
                             }
                             .padding(12)
                             .background { GlassCard(cornerRadius: 14) { Color.clear } }
@@ -645,7 +642,6 @@ struct MyActivitiesSheet: View {
         .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -681,7 +677,7 @@ struct NewActivitySheet: View {
                     TextField("What's the plan?", text: $note, axis: .vertical)
                     Stepper("Capacity: \(capacity)", value: $capacity, in: 2...50)
                     Toggle("Public activity", isOn: $isPublic)
-                        .tint(Theme.gold)
+                        .tint(Theme.iris)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -708,7 +704,6 @@ struct NewActivitySheet: View {
         } message: {
             Text("You must set your profile to Public to create or join community activities.")
         }
-        .preferredColorScheme(.dark)
     }
 
     private func post() {

@@ -4,11 +4,11 @@ import SwiftData
 /// Pulse — the activity list: who logged what, and how recently.
 ///
 /// Layout, top to bottom:
-///   • header — Ralli wordmark, search, notifications bell, gold add-friend
-///   • filter chips — Unread / Today / Streaks / Groups, active chip in gold
+///   • header — Ralli wordmark, search, notifications bell, iris add-friend
+///   • filter chips — Unread / Today / Streaks / Groups, active chip in iris
 ///   • "All friends" entry into the unified stacked clip feed
 ///   • one row per friend or group — orb avatar, name, status line, timestamp,
-///     a gold glow dot when there's something new, and a quick-chat action
+///     a iris glow dot when there's something new, and a quick-chat action
 struct PulseHomeView: View {
     @Query private var friends: [Friend]
     @Query(sort: \Chat.createdAt) private var chats: [Chat]
@@ -60,11 +60,11 @@ struct PulseHomeView: View {
                 GlassBackground()
 
                 ScrollView {
-                    LazyVStack(spacing: 10) {
+                    LazyVStack(spacing: 0) {
                         allFriendsCard
 
                         ForEach(entries) { entry in
-                            PulseRow(entry: entry) {
+                            ChatRowView(entry: entry) {
                                 switch entry.kind {
                                 case .friend(let friend): openedFriend = friend
                                 case .group(let chat): openedGroup = chat
@@ -79,7 +79,7 @@ struct PulseHomeView: View {
 
                         if entries.isEmpty { emptyState }
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.top, 4)
                     .padding(.bottom, 118)
                 }
                 .scrollIndicators(.hidden)
@@ -151,8 +151,8 @@ struct PulseHomeView: View {
                     showNewGroup = true
                 }
                 // The screen's primary action, and the way into add-by-handle:
-                // the only solid-gold control in the header.
-                GlassCircleButton(icon: "plus", label: "Add friend", isGold: true) {
+                // the only solid-iris control in the header.
+                GlassCircleButton(icon: "plus", label: "Add friend", isProminent: true) {
                     showAddFriend = true
                 }
             }
@@ -181,14 +181,14 @@ struct PulseHomeView: View {
         .padding(.top, 6)
         .padding(.bottom, 10)
         .background {
-            // Glass needs something behind it: the header floats over the
-            // gradient and the scrolling rows, not over a flat fill.
+            // Solid canvas so the list scrolls cleanly under the header, with a
+            // hairline to separate it from the content beneath.
             Rectangle()
-                .fill(.ultraThinMaterial)
+                .fill(Theme.base)
                 .overlay(alignment: .bottom) {
                     Rectangle()
-                        .fill(Theme.glassRimTop.opacity(0.25))
-                        .frame(height: 1)
+                        .fill(Theme.hairline)
+                        .frame(height: 0.5)
                 }
                 .ignoresSafeArea(edges: .top)
         }
@@ -196,37 +196,40 @@ struct PulseHomeView: View {
 
     // MARK: Rows
 
-    /// Explicit entry point to the unified feed of everyone's clips.
+    /// Explicit entry point to the unified feed of everyone's clips. Shares the
+    /// chat row's geometry so it reads as the first line of the list, not a card
+    /// bolted on above it — the iris disc is the only thing marking it apart.
     private var allFriendsCard: some View {
         Button {
             showAllFriends = true
         } label: {
-            GlassCard(cornerRadius: 20) {
-                HStack(spacing: 14) {
-                    ZStack {
-                        Circle()
-                            .fill(Theme.goldSheen)
-                            .frame(width: 46, height: 46)
-                            .shadow(color: Theme.goldGlow.opacity(0.45), radius: 12)
-                        Image(systemName: "square.stack.3d.up.fill")
-                            .font(.system(size: 19, weight: .bold))
-                            .foregroundStyle(.black)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("All friends")
-                            .font(.system(size: 17, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("Everyone's latest clip, end to end")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Theme.goldSoft)
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(Theme.iris)
+                        .frame(width: 52, height: 52)
+                        .shadow(color: Theme.iris.opacity(0.3), radius: 10, y: 3)
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(Theme.onIris)
                 }
-                .padding(14)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("All friends")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("Everyone's latest clip, end to end")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -265,10 +268,12 @@ struct PulseEntry: Identifiable {
     let kind: Kind
     let id: UUID
     let name: String
+    /// Caption of this person's (or crew's) latest video log — the row's subtitle.
     let status: String
     let streak: Int
     let activityAt: Date?
     let members: [Friend]
+    let isOnline: Bool
 
     init(friend: Friend) {
         kind = .friend(friend)
@@ -278,6 +283,7 @@ struct PulseEntry: Identifiable {
         streak = friend.streakCount
         activityAt = friend.latestClip?.capturedAt
         members = [friend]
+        isOnline = friend.isOnline
     }
 
     init(group: Chat) {
@@ -288,6 +294,8 @@ struct PulseEntry: Identifiable {
         streak = group.streakCount
         activityAt = group.sortedClips.first?.capturedAt
         members = group.members.filter { !$0.isMe }
+        // A crew is "live" when anyone but you is.
+        isOnline = group.members.contains { !$0.isMe && $0.isOnline }
     }
 
     var isGroup: Bool { if case .group = kind { true } else { false } }
@@ -306,6 +314,9 @@ struct PulseEntry: Identifiable {
     }
 
     var timestamp: String { activityAt?.relativeHour ?? "" }
+
+    /// "2h" — trails the caption on the row's subtitle line.
+    var shortTimestamp: String { activityAt?.shortRelative ?? "" }
 }
 
 // MARK: - Filters
@@ -335,7 +346,7 @@ enum PulseFilter: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Shown as a small gold pill on the chip. "All" carries no count — a total
+    /// Shown as a small iris pill on the chip. "All" carries no count — a total
     /// of everything isn't information.
     func count(in entries: [PulseEntry]) -> Int {
         self == .all ? 0 : entries.filter(matches).count
@@ -344,113 +355,116 @@ enum PulseFilter: String, CaseIterable, Identifiable {
 
 // MARK: - List row
 
-/// A friend or group row: orb avatar, name, status line, timestamp, and the
-/// quick way into the thread. Unread rows carry a gold glow dot and heavier type.
-private struct PulseRow: View {
+/// One chat-list row on black: avatar (with a green dot when they're live), the
+/// name, and underneath it the caption of their latest video log followed by how
+/// old it is. A blue dot on the trailing edge marks unread.
+///
+/// Deliberately flat — no card, no divider. The rows are separated by rhythm and
+/// the avatar column alone, which is what keeps a long list quiet.
+struct ChatRowView: View {
     let entry: PulseEntry
     let onOpen: () -> Void
     let onChat: () -> Void
 
     var body: some View {
         Button(action: onOpen) {
-            GlassCard(cornerRadius: 20) {
-                HStack(spacing: 13) {
-                    avatar
+            HStack(spacing: 12) {
+                avatar
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(entry.name)
-                                .font(.system(size: 16,
-                                              weight: entry.isUnread ? .heavy : .bold,
-                                              design: .rounded))
-                                .foregroundStyle(entry.isUnread
-                                                 ? Theme.textPrimary
-                                                 : Theme.textPrimary.opacity(0.82))
-                                .lineLimit(1)
-                            if entry.streak > 0 {
-                                StreakBadge(count: entry.streak)
-                            }
-                        }
-                        Text(entry.status.isEmpty ? "No logs yet" : entry.status)
-                            .font(.system(size: 13))
-                            .foregroundStyle(entry.status.isEmpty
-                                             ? Theme.textSecondary.opacity(0.6)
-                                             : Theme.textSecondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) {
+                        Text(entry.name)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Theme.textPrimary)
                             .lineLimit(1)
-                    }
-
-                    Spacer(minLength: 4)
-
-                    VStack(alignment: .trailing, spacing: 6) {
-                        Text(entry.timestamp)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(entry.isUnread ? Theme.gold : Theme.textSecondary)
-                        if entry.isUnread {
-                            GlowDot(size: 9)
+                        if entry.streak > 0 {
+                            Text("🔥\(entry.streak)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.coral)
+                                .fixedSize()
                         }
                     }
-
-                    QuickChatButton(action: onChat)
+                    Text(subtitle)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
                 }
-                .padding(12)
+
+                Spacer(minLength: 8)
+
+                if entry.isUnread {
+                    Circle()
+                        .fill(Theme.iris)
+                        .frame(width: 9, height: 9)
+                        .accessibilityLabel("Unread")
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // The row itself opens the video feed, so the DM keeps its own way in.
+        .contextMenu {
+            Button(action: onChat) {
+                Label("Open chat", systemImage: "bubble.left.and.bubble.right.fill")
+            }
+        }
+    }
+
+    /// "Latest video caption · 2h". The timestamp is dropped rather than shown
+    /// dangling when there's no log to date.
+    private var subtitle: String {
+        let caption = entry.status.isEmpty ? "No logs yet" : entry.status
+        let stamp = entry.shortTimestamp
+        return stamp.isEmpty ? caption : "\(caption) · \(stamp)"
+    }
+
+    private var avatar: some View {
+        ZStack(alignment: .bottomTrailing) {
+            avatarImage
+
+            if entry.isOnline {
+                Circle()
+                    .fill(Theme.mint)
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().strokeBorder(Theme.base, lineWidth: 2.5))
+                    .accessibilityLabel("Online")
+            }
+        }
+        .frame(width: 52, height: 52)
     }
 
     @ViewBuilder
-    private var avatar: some View {
-        if entry.isGroup {
+    private var avatarImage: some View {
+        // Note the `count >= 2` rather than `isGroup`: a crew you're the only
+        // remaining member of, or a one-other-person group, has nothing to stack
+        // — it falls through to the single avatar, then to the placeholder,
+        // instead of rendering an empty 52pt hole.
+        if entry.members.count >= 2 {
+            // Two faces, offset — enough to read as a crew at 52pt without
+            // shrinking either one into an unrecognisable dot.
             ZStack {
-                ForEach(Array(entry.members.prefix(3).enumerated()), id: \.element.id) { index, member in
-                    GlassOrbAvatar(friend: member, size: 38)
-                        .offset(x: CGFloat(index) * 13 - 13)
+                ForEach(Array(entry.members.prefix(2).enumerated()), id: \.element.id) { index, member in
+                    AvatarView(friend: member, size: 38)
+                        .clipShape(Circle())
+                        .overlay(Circle().strokeBorder(Theme.base, lineWidth: 2))
+                        .offset(x: index == 0 ? -7 : 7, y: index == 0 ? -7 : 7)
                 }
             }
             .frame(width: 52, height: 52)
         } else if let friend = entry.members.first {
-            // Gold ring when they've posted recently — the row's "live" signal.
-            GlassOrbAvatar(friend: friend, size: 52, isActive: entry.isUnread)
-        }
-    }
-}
-
-/// 🔥 + count, in gold.
-private struct StreakBadge: View {
-    let count: Int
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Text("🔥").font(.system(size: 11))
-            Text("\(count)")
-                .font(.system(size: 12, weight: .heavy, design: .rounded))
-                .foregroundStyle(Theme.gold)
-        }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background {
-            Capsule().fill(Theme.gold.opacity(0.14))
-                .overlay { Capsule().strokeBorder(Theme.gold.opacity(0.3), lineWidth: 0.5) }
-        }
-    }
-}
-
-/// Straight into the 1-on-1 DM, without opening the video view first.
-private struct QuickChatButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "bubble.left.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Theme.goldSoft)
-                .frame(width: 38, height: 38)
-                .background {
-                    Circle().fill(.ultraThinMaterial)
-                        .overlay(Circle().strokeBorder(Theme.gold.opacity(0.28), lineWidth: 1))
+            AvatarView(friend: friend, size: 52)
+                .clipShape(Circle())
+        } else {
+            Circle()
+                .fill(Theme.sunken)
+                .frame(width: 52, height: 52)
+                .overlay {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(Theme.textTertiary)
                 }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Chat")
     }
 }

@@ -50,6 +50,8 @@ struct PulseFeedView: View {
         }
         // Every card reads the hour from the environment — one tap re-times all.
         .environment(hourState)
+        // Immersive media wall — stays dark whatever the system theme.
+        .preferredColorScheme(.dark)
         .fullScreenCover(item: $openedChat) { chat in
             LogPlayerView(startingChat: chat)
         }
@@ -182,7 +184,7 @@ struct PulseFeedView: View {
                     Spacer()
                     Image(systemName: "play.circle.fill")
                         .font(.title2)
-                        .foregroundStyle(Theme.gold)
+                        .foregroundStyle(Theme.iris)
                 }
                 .padding(12)
             }
@@ -292,8 +294,11 @@ struct PulseFeedView: View {
 
             Spacer(minLength: 0)
 
-            // Chat → the 1-on-1 / group threads that used to be this screen's list.
-            circleButton(icon: "bubble.left.fill") { showChatList = true }
+            // Chat → the 1-on-1 / group threads that used to be this screen's
+            // list. Uses the custom chat mark instead of an SF speech bubble.
+            circleButton(action: { showChatList = true }) {
+                ChatGlyph(size: 17, color: Theme.textPrimary)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -301,10 +306,19 @@ struct PulseFeedView: View {
     }
 
     private func circleButton(icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        circleButton(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(Theme.textPrimary)
+        }
+    }
+
+    /// Circle-button chrome shared by the calendar and chat header actions,
+    /// with an arbitrary glyph so the chat entry can use the custom mark.
+    private func circleButton<Glyph: View>(action: @escaping () -> Void,
+                                           @ViewBuilder glyph: () -> Glyph) -> some View {
+        Button(action: action) {
+            glyph()
                 .frame(width: 38, height: 38)
                 .background(Circle().fill(Theme.baseElevated))
         }
@@ -316,7 +330,7 @@ struct PulseFeedView: View {
         HStack(spacing: 8) {
             Image(systemName: "clock.fill")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Theme.gold)
+                .foregroundStyle(Theme.iris)
             Text(hourState.hourLabel)
                 .font(.system(size: 15, weight: .heavy, design: .rounded).monospacedDigit())
                 .foregroundStyle(Theme.textPrimary)
@@ -328,7 +342,7 @@ struct PulseFeedView: View {
             if !hourState.isAtCurrentHour {
                 Button("now") { withAnimation(.easeInOut(duration: 0.2)) { hourState.resetToNow() } }
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(Theme.gold)
+                    .foregroundStyle(Theme.iris)
                     .buttonStyle(.plain)
             }
         }
@@ -460,7 +474,7 @@ private struct PulseCard: View {
                 VStack(spacing: 16) {
                     railButton("sparkles") { if let chat = entry.chat { onOpen(chat) } }
                     railButton("arrowshape.turn.up.left.fill") { if let chat = entry.chat { onReply(chat) } }
-                    railButton(isLiked ? "heart.fill" : "heart", tint: isLiked ? Theme.gold : .white) {
+                    railButton(isLiked ? "heart.fill" : "heart", tint: isLiked ? Theme.coral : .white) {
                         toggleLike()
                     }
                 }
@@ -564,7 +578,7 @@ private struct ChatRow: View {
                         Text("🔥")
                         Text("\(chat.streak)")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.gold)
+                            .foregroundStyle(Theme.iris)
                     }
                 }
                 CooldownLabel(chat: chat)

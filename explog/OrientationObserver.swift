@@ -3,9 +3,14 @@ import UIKit
 
 /// Watches the physical device orientation so the app can react to the user
 /// simply *turning the phone sideways* — the gesture that opens the camera.
+/// The camera screen then forces the *interface* into landscape itself (see
+/// `InterfaceOrientationLock`), so this observer only needs the coarse
+/// landscape-vs-portrait signal, not the specific edge.
 ///
 /// `UIDevice.orientation` also reports `.faceUp` / `.faceDown` / `.unknown`;
-/// those are ignored so a phone resting on a table never flips the UI.
+/// those are ignored so a phone resting on a table never flips the UI. Note it
+/// tracks *physical* orientation and keeps firing even while the interface is
+/// locked to landscape — which is what lets "turn back to portrait" still exit.
 @Observable
 @MainActor
 final class OrientationObserver {
