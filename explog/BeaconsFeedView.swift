@@ -7,6 +7,8 @@ struct BeaconsFeedView: View {
     @Query private var beacons: [Beacon]
     @Query private var friends: [Friend]
     @Environment(AppRouter.self) private var router
+    @Environment(BeaconSync.self) private var beaconSync
+    @Environment(\.modelContext) private var modelContext
 
     // NEW: feed segmentation (friends vs public community).
     enum Segment: String, CaseIterable {
@@ -35,46 +37,34 @@ struct BeaconsFeedView: View {
             VStack(spacing: 0) {
                 header
 
-                // Friends ↔ Public, as iris filter chips rather than a system
-                // segmented control, which can't be tinted to match the rest.
-                HStack(spacing: 8) {
-                    ForEach(Segment.allCases, id: \.self) { option in
-                        FilterChip(title: option.rawValue,
-                                   count: beacons.filter {
-                                       option == .publicFeed ? $0.isPublic : !$0.isPublic
-                                   }.count,
-                                   isActive: segment == option) {
-                            withAnimation(.easeOut(duration: 0.18)) { segment = option }
-                        }
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
+                // Friends ↔ Public as a single segmented pill: the active segment
+                // is coral-washed with its count in a small coral pill.
+                BeaconSegments(segment: $segment,
+                               friendsCount: beacons.filter { !$0.isPublic }.count,
+                               publicCount: beacons.filter { $0.isPublic }.count)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 14)
 
                 ScrollView {
-                    LazyVStack(spacing: 14) {
+                    LazyVStack(spacing: 18) {
                         ForEach(filtered, id: \.id) { beacon in
                             BeaconFeedCard(beacon: beacon)
                         }
-                        if filtered.isEmpty {
-                            VStack(spacing: 8) {
-                                Text("📡").font(.system(size: 50))
-                                Text(segment == .friends
-                                     ? "No friend beacons right now"
-                                     : "No public activities nearby yet")
-                                    .font(.subheadline)
-                                    .foregroundStyle(Theme.textSecondary)
-                            }
-                            .padding(.top, 60)
-                        }
+                        if filtered.isEmpty { emptyState }
                     }
                     .padding(.horizontal, 16)
+                    .padding(.top, 2)
                     .padding(.bottom, 118)
                 }
                 .scrollIndicators(.hidden)
             }
         }
+        .overlay(alignment: .top) { syncErrorBanner }
+        // Both segments load together: the counts on the segmented control are
+        // part of the first impression, so a public feed that only fills in
+        // after you tap over to it reads as empty.
+        .refreshable { await syncBeacons() }
+        .task { await syncBeacons() }
         .sheet(isPresented: $showMyActivities) {
             MyActivitiesSheet()
         }
@@ -96,8 +86,10 @@ struct BeaconsFeedView: View {
             let publicBeacons = beacons.filter(\.isPublic).sorted { $0.startsAt < $1.startsAt }
             switch ProcessInfo.processInfo.environment["EXPLOG_AUTO_OPEN"] {
             case "joined": showMyActivities = true
+            case "publicbeacons": segment = .publicFeed
             case "detail": segment = .publicFeed; debugDetail = publicBeacons.first
             case "activitychat": segment = .publicFeed; debugChat = publicBeacons.first
+            case "newbeacon": showCreate = true
             default: break
             }
         }
@@ -116,15 +108,196 @@ struct BeaconsFeedView: View {
             }
             // Create a public activity (privacy-guarded) — the primary action.
             GlassCircleButton(icon: "plus", label: "Create an activity", isProminent: true) {
-                if me?.isPrivate == true {
-                    showPrivacyAlert = true
-                } else {
-                    showCreate = true
-                }
+                startCreate()
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
+    }
+
+    /// Warm empty state — a friendly nudge plus the one coral create action.
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Text("📡").font(.system(size: 54))
+            VStack(spacing: 5) {
+                Text(segment == .friends ? "No friend beacons yet" : "Nothing public nearby yet")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                Text(segment == .friends
+                     ? "Start one and your friends can join in."
+                     : "Be the first to light one up in your area.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            Button(action: startCreate) {
+                Label("Start a beacon", systemImage: "plus")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.onAccent)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 12)
+                    .background(Capsule().fill(Theme.accent)
+                        .shadow(color: Theme.accent.opacity(0.3), radius: 12, y: 4))
+            }
+            .buttonStyle(PressScaleStyle())
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 70)
+        .padding(.horizontal, 24)
+    }
+
+    /// Pulls both feeds and pushes anything created while offline.
+    private func syncBeacons() async {
+        await beaconSync.syncDown(context: modelContext)
+        await beaconSync.syncPublicDown(context: modelContext)
+        await beaconSync.publishPending(context: modelContext)
+    }
+
+    /// A beacon that didn't reach the server, or a refused RSVP, is otherwise
+    /// invisible: the row is already on screen either way. This is the one place
+    /// that says so.
+    @ViewBuilder
+    private var syncErrorBanner: some View {
+        if let message = beaconSync.lastError {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(message)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+                Button {
+                    beaconSync.clearError()
+                } label: {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+                }
+                .buttonStyle(.plain)
+            }
+            .foregroundStyle(Theme.onAccent)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(Theme.accent))
+            .padding(.horizontal, 20)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// Create a beacon, honoring the public-profile privacy guard.
+    private func startCreate() {
+        if me?.isPrivate == true {
+            showPrivacyAlert = true
+        } else {
+            showCreate = true
+        }
+    }
+}
+
+// MARK: - Segmented Friends / Public control
+
+/// A single sunken pill split into two segments; the active one is coral-washed
+/// with its count in a small coral pill. Reads as one control, not two chips.
+struct BeaconSegments: View {
+    @Binding var segment: BeaconsFeedView.Segment
+    let friendsCount: Int
+    let publicCount: Int
+
+    @Namespace private var slide
+
+    var body: some View {
+        HStack(spacing: 4) {
+            segmentButton(.friends, count: friendsCount)
+            segmentButton(.publicFeed, count: publicCount)
+        }
+        .padding(4)
+        .background(Capsule().fill(Theme.sunken))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func segmentButton(_ option: BeaconsFeedView.Segment, count: Int) -> some View {
+        let isActive = segment == option
+        return Button {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) { segment = option }
+        } label: {
+            HStack(spacing: 6) {
+                Text(option.rawValue)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isActive ? Theme.accentPressed : Theme.textSecondary)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 11, weight: .bold).monospacedDigit())
+                        .foregroundStyle(isActive ? Theme.onAccent : Theme.textSecondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background {
+                            Capsule().fill(isActive ? AnyShapeStyle(Theme.accent)
+                                                    : AnyShapeStyle(Theme.textSecondary.opacity(0.16)))
+                        }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 9)
+            .background {
+                if isActive {
+                    Capsule().fill(Theme.accentWash)
+                        .matchedGeometryEffect(id: "seg", in: slide)
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Countdown chip
+
+/// A live countdown pill for a beacon's start time. Sunken/glass by default; when
+/// the activity starts soon (<30 min) or is live, the dot pulses and the chip
+/// goes coral — the feed feels time-sensitive.
+struct BeaconCountdownChip: View {
+    let startsAt: Date
+    /// `true` renders white-on-glass for legibility over the hero image.
+    var overMedia: Bool = false
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let state = Self.state(start: startsAt, now: context.date)
+            let hot = state.urgent
+            HStack(spacing: 6) {
+                GlowDot(size: 7, color: hot ? Theme.accent : (overMedia ? .white : Theme.textSecondary),
+                        breathing: hot)
+                Text(state.text)
+                    .font(.system(size: 12, weight: .bold).monospacedDigit())
+                    .foregroundStyle(hot ? Theme.onAccent
+                                         : (overMedia ? .white : Theme.textPrimary))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background {
+                Capsule()
+                    .fill(hot ? AnyShapeStyle(Theme.accent)
+                              : AnyShapeStyle(overMedia ? AnyShapeStyle(.ultraThinMaterial)
+                                                        : AnyShapeStyle(Theme.sunken)))
+                    .overlay {
+                        if overMedia && !hot {
+                            Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 0.75)
+                        }
+                    }
+                    .shadow(color: hot ? Theme.accent.opacity(0.35) : .clear, radius: 8, y: 2)
+            }
+        }
+    }
+
+    static func state(start: Date, now: Date) -> (text: String, urgent: Bool, live: Bool) {
+        let delta = start.timeIntervalSince(now)
+        if delta <= 0 { return ("Live now", true, true) }
+        let hours = Int(delta) / 3600
+        let minutes = (Int(delta) % 3600) / 60
+        let text: String
+        if hours > 0 { text = "\(hours) hr \(minutes) min" }
+        else if minutes > 0 { text = "\(minutes) min" }
+        else { text = "under a min" }
+        return (text, delta < 30 * 60, false)
     }
 }
 
@@ -135,6 +308,7 @@ struct BeaconFeedCard: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(AppRouter.self) private var router
+    @Environment(BeaconSync.self) private var beaconSync
     @Query private var friends: [Friend]
     @State private var showDetail = false
     @State private var showPrivacyAlert = false
@@ -145,88 +319,33 @@ struct BeaconFeedCard: View {
         return beacon.hasJoined(me)
     }
 
+    @State private var joinPulse = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                if let host = beacon.host {
-                    // Iris ring on the host's orb — they're the live signal here.
-                    GlassOrbAvatar(friend: host, size: 40, isActive: true)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(host.name)
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text(beacon.isPublic ? "hosting a public activity" : "is heading out")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                } else {
-                    ZStack {
-                        Circle().fill(Theme.irisWash)
-                        Image(systemName: "person.3.fill")
-                            .font(.caption)
-                            .foregroundStyle(Theme.iris)
-                    }
-                    .frame(width: 40, height: 40)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Community event")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("open to everyone")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
+        VStack(spacing: 0) {
+            hero
+            VStack(alignment: .leading, spacing: 14) {
+                hostRow
+                if !beacon.note.isEmpty {
+                    Text(beacon.note)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textPrimary.opacity(0.9))
+                        .lineLimit(2)
                 }
-                Spacer()
-                HStack(spacing: 5) {
-                    GlowDot(size: 7, breathing: true)
-                    Text(beacon.startsAt, style: .relative)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Theme.iris)
+                HStack(alignment: .bottom, spacing: 12) {
+                    capacityMeter
+                    Spacer(minLength: 4)
+                    actions
                 }
             }
-
-            if let spot = beacon.spot {
-                HStack(spacing: 10) {
-                    VibeClipView(emoji: spot.emoji, label: spot.name,
-                                 hueA: spot.hueA, hueB: spot.hueB, animate: false)
-                        .frame(width: 56, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(spot.name)
-                            .font(.headline)
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("\(spot.category) · \(spot.distanceMiles, specifier: "%.1f") mi")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-            }
-
-            Text(beacon.note)
-                .font(.subheadline)
-                .foregroundStyle(Theme.textPrimary.opacity(0.9))
-
-            HStack(spacing: 10) {
-                capacityMeter
-                Spacer(minLength: 4)
-                // "More Details" opens the activity detail sheet.
-                AccentChip(title: "Details", systemImage: "info.circle") {
-                    showDetail = true
-                }
-                // Filled iris once you're in — RSVP state reads at a glance.
-                AccentChip(title: joined ? "Going" : (beacon.isFull ? "Full" : "Join"),
-                         systemImage: joined ? "checkmark" : nil,
-                         isFilled: joined) {
-                    attemptJoin()
-                }
-                .disabled(!joined && beacon.isFull)
-                .opacity(!joined && beacon.isFull ? 0.45 : 1)
-            }
+            .padding(16)
         }
-        .padding(16)
         .background {
-            GlassCard(cornerRadius: 20) { Color.clear }
+            RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: Color(hex: 0x14121E, alpha: 0.07), radius: 18, y: 8)
+        .shadow(color: Color(hex: 0x14121E, alpha: 0.05), radius: 1.5, y: 1)
         .sheet(isPresented: $showDetail) {
             ActivityDetailSheet(beacon: beacon)
         }
@@ -239,34 +358,184 @@ struct BeaconFeedCard: View {
         }
     }
 
-    /// Who's in, and how close to full: attendee orbs plus a iris fill bar that
-    /// runs hot as the last spots go.
+    /// Full-bleed hero banner: the place's vibe visual anchors the card, with the
+    /// place name overlaid and the live countdown chip pinned top-leading.
+    private var hero: some View {
+        ZStack(alignment: .bottomLeading) {
+            Group {
+                if let spot = beacon.spot {
+                    VibeClipView(emoji: spot.emoji, label: spot.name,
+                                 hueA: spot.hueA, hueB: spot.hueB, animate: false)
+                } else {
+                    Theme.accentGradient
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 150)
+            .clipped()
+
+            LinearGradient(colors: [.clear, .black.opacity(0.12), .black.opacity(0.6)],
+                           startPoint: .top, endPoint: .bottom)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(beacon.spot?.name ?? "Community spot")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.4), radius: 6, y: 1)
+                    .lineLimit(1)
+                if let spot = beacon.spot {
+                    Text("\(spot.category) · \(spot.distanceMiles, specifier: "%.1f") mi away")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                } else {
+                    Text("Open to everyone")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+            }
+            .padding(14)
+        }
+        .frame(height: 150)
+        .overlay(alignment: .topLeading) {
+            BeaconCountdownChip(startsAt: beacon.startsAt, overMedia: true)
+                .padding(12)
+        }
+        .overlay(alignment: .topTrailing) {
+            if beacon.isFull {
+                Text("Full")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.onAccent)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Theme.accent))
+                    .padding(12)
+            }
+        }
+    }
+
+    /// Who's behind the beacon: host orb (coral "new" ring) or a coral-wash group
+    /// icon for community events, with a soft subtitle.
+    private var hostRow: some View {
+        HStack(spacing: 10) {
+            if let host = beacon.host {
+                GlassOrbAvatar(friend: host, size: 40, isActive: true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(host.name)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(beacon.isPublic ? "hosting · open to everyone" : "is heading out")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else if !beacon.hostName.isEmpty {
+                // A public beacon's host is usually someone the viewer isn't
+                // friends with, so there's no local `Friend` row to draw from —
+                // only the identity the server denormalised onto the beacon.
+                RemoteHostOrb(emoji: beacon.hostEmoji, avatarURL: beacon.hostAvatarURL, size: 40)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(beacon.hostName)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(beacon.isPublic ? "hosting · open to everyone" : "is heading out")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else {
+                ZStack {
+                    Circle().fill(Theme.accentWash)
+                    Image(systemName: "person.3.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.accent)
+                }
+                .frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Community event")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("open to everyone")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    /// Details (ghost) + Going (primary coral, filled + springy once confirmed).
+    private var actions: some View {
+        HStack(spacing: 10) {
+            Button { showDetail = true } label: {
+                Text("Details")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(Theme.sunken))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: confirmJoin) {
+                HStack(spacing: 5) {
+                    Image(systemName: joined ? "checkmark" : "bolt.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text(joined ? "Going" : (beacon.isFull ? "Full" : "Join"))
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(joined ? Theme.onAccent : Theme.accent)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background {
+                    Capsule().fill(joined ? AnyShapeStyle(Theme.accent)
+                                          : AnyShapeStyle(Theme.accentWash))
+                        .shadow(color: joined ? Theme.accent.opacity(0.3) : .clear, radius: 10, y: 3)
+                }
+            }
+            .buttonStyle(.plain)
+            .scaleEffect(joinPulse ? 1.08 : 1)
+            .disabled(!joined && beacon.isFull)
+            .opacity(!joined && beacon.isFull ? 0.5 : 1)
+        }
+    }
+
+    /// Who's in, and how close to full: overlapping attendee avatars, x/capacity,
+    /// and a quiet coral capacity bar that runs hot as the last spots go.
     private var capacityMeter: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: -8) {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: -10) {
                 ForEach(beacon.attendees.prefix(4), id: \.id) { friend in
-                    GlassOrbAvatar(friend: friend, size: 24)
+                    AvatarView(friend: friend, size: 28)
+                        .overlay(Circle().strokeBorder(Theme.surface, lineWidth: 2))
                 }
                 Text("\(beacon.joined.count)/\(beacon.capacity)")
-                    .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(beacon.isFull ? Theme.iris : Theme.textSecondary)
-                    .padding(.leading, 14)
+                    .font(.system(size: 12, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(beacon.isFull ? Theme.accent : Theme.textSecondary)
+                    .padding(.leading, 16)
             }
             GeometryReader { proxy in
                 let fraction = min(1, Double(beacon.joined.count) / Double(max(beacon.capacity, 1)))
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Theme.textPrimary.opacity(0.12))
+                    Capsule().fill(Theme.textPrimary.opacity(0.1))
                     Capsule()
-                        .fill(Theme.irisGradient)
+                        .fill(Theme.accentGradient)
                         .frame(width: proxy.size.width * fraction)
-                        .shadow(color: Theme.irisGlow.opacity(0.5), radius: 5)
                 }
             }
-            .frame(width: 96, height: 3)
+            .frame(width: 112, height: 4)
         }
     }
 
+    /// Springy confirm, then the actual RSVP.
+    private func confirmJoin() {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.4)) { joinPulse = true }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.6).delay(0.12)) { joinPulse = false }
+        attemptJoin()
+    }
+
     /// RSVP with the privacy guard applied to public activities.
+    ///
+    /// The guard is kept here so the user gets the "make your profile public"
+    /// route rather than a bare error, but the server enforces it (and capacity,
+    /// and the friends-only guest list) independently — this is UI, not the rule.
     private func attemptJoin() {
         guard let me else { return }
         if beacon.isPublic && me.isPrivate && !joined {
@@ -274,11 +543,10 @@ struct BeaconFeedCard: View {
             return
         }
         if joined {
-            beacon.joined.removeAll { $0.id == me.id }
+            Task { await beaconSync.leave(beacon, as: me, context: modelContext) }
         } else if !beacon.isFull {
-            beacon.joined.append(me)
+            Task { await beaconSync.join(beacon, as: me, context: modelContext) }
         }
-        try? modelContext.save()
     }
 }
 
@@ -290,8 +558,8 @@ struct ActivityDetailSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(AppRouter.self) private var router
     @Environment(\.dismiss) private var dismiss
+    @Environment(BeaconSync.self) private var beaconSync
     @Query private var friends: [Friend]
-    @Query private var chats: [Chat]
     @State private var profileFriend: Friend?
     @State private var showChat = false
     @State private var hostChat: Chat?
@@ -320,7 +588,7 @@ struct ActivityDetailSheet: View {
                                     .foregroundStyle(Theme.textPrimary)
                                 Text("\(spot.distanceMiles, specifier: "%.1f") mi from you")
                                     .font(.caption)
-                                    .foregroundStyle(Theme.iris)
+                                    .foregroundStyle(Theme.accent)
                             }
                         }
                         if !spot.address.isEmpty {
@@ -334,7 +602,7 @@ struct ActivityDetailSheet: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Label("About this spot", systemImage: "sparkles")
                                 .font(.subheadline.weight(.bold))
-                                .foregroundStyle(Theme.iris)
+                                .foregroundStyle(Theme.accent)
                             Text(spot.aiInsight)
                                 .font(.subheadline)
                                 .foregroundStyle(Theme.textPrimary.opacity(0.85))
@@ -362,7 +630,7 @@ struct ActivityDetailSheet: View {
                                         if friend.id == beacon.host?.id {
                                             Text("host")
                                                 .font(.system(size: 9, weight: .bold))
-                                                .foregroundStyle(Theme.iris)
+                                                .foregroundStyle(Theme.accent)
                                         }
                                     }
                                 }
@@ -381,10 +649,10 @@ struct ActivityDetailSheet: View {
                         Label(attending ? "Open activity group chat" : "Join to unlock group chat",
                               systemImage: "bubble.left.and.bubble.right.fill")
                             .font(.headline)
-                            .foregroundStyle(Theme.onIris)
+                            .foregroundStyle(Theme.onAccent)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(Capsule().fill(Theme.iris))
+                            .background(Capsule().fill(Theme.accent))
                     }
                     .padding(.top, 6)
 
@@ -395,10 +663,10 @@ struct ActivityDetailSheet: View {
                         } label: {
                             Label("Message \(host.name) directly", systemImage: "bubble.left.fill")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Theme.iris)
+                                .foregroundStyle(Theme.accent)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 11)
-                                .background(Capsule().fill(Theme.iris.opacity(0.15)))
+                                .background(Capsule().fill(Theme.accent.opacity(0.15)))
                         }
                     }
                 }
@@ -413,7 +681,7 @@ struct ActivityDetailSheet: View {
                 }
             }
         }
-        .sheet(item: $profileFriend) { friend in
+        .fullScreenCover(item: $profileFriend) { friend in
             PublicProfileSheet(friend: friend)
         }
         .sheet(isPresented: $showChat) {
@@ -436,16 +704,7 @@ struct ActivityDetailSheet: View {
     /// Finds the existing 1-on-1 chat with the host, creating one if needed.
     private func openHostChat(_ host: Friend) {
         guard let me else { return }
-        if let existing = chats.first(where: { chat in
-            !chat.isGroup && chat.members.contains { $0.id == host.id }
-        }) {
-            hostChat = existing
-        } else {
-            let chat = Chat(isGroup: false, members: [me, host])
-            modelContext.insert(chat)
-            try? modelContext.save()
-            hostChat = chat
-        }
+        hostChat = Chat.dm(with: host, me: me, in: modelContext)
     }
 
     private func attemptJoin() {
@@ -455,8 +714,7 @@ struct ActivityDetailSheet: View {
             return
         }
         if !beacon.isFull {
-            beacon.joined.append(me)
-            try? modelContext.save()
+            Task { await beaconSync.join(beacon, as: me, context: modelContext) }
         }
     }
 }
@@ -553,7 +811,7 @@ struct ActivityChatView: View {
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 30))
-                            .foregroundStyle(draft.isEmpty || !canPost ? Theme.textSecondary : Theme.iris)
+                            .foregroundStyle(draft.isEmpty || !canPost ? Theme.textSecondary : Theme.accent)
                     }
                     .disabled(draft.isEmpty || !canPost)
                 }
@@ -627,7 +885,7 @@ struct MyActivitiesSheet: View {
                                 Spacer()
                                 Text("\(beacon.joined.count)/\(beacon.capacity)")
                                     .font(.caption.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(Theme.iris)
+                                    .foregroundStyle(Theme.accent)
                             }
                             .padding(12)
                             .background { GlassCard(cornerRadius: 14) { Color.clear } }
@@ -651,10 +909,11 @@ struct NewActivitySheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(AppRouter.self) private var router
-    @Query(sort: \Spot.distanceMiles) private var spots: [Spot]
+    @Environment(BeaconSync.self) private var beaconSync
     @Query private var friends: [Friend]
 
     @State private var selectedSpot: Spot?
+    @State private var showSpotSearch = false
     @State private var note = ""
     @State private var capacity = 8
     @State private var isPublic = true
@@ -665,11 +924,31 @@ struct NewActivitySheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                // Location search rather than a dropdown of local rows: `Spot`
+                // only ever came from DEBUG seed data, so the old picker was
+                // empty for every real account.
                 Section("Where") {
-                    Picker("Spot", selection: $selectedSpot) {
-                        Text("Pick a spot").tag(Spot?.none)
-                        ForEach(spots, id: \.id) { spot in
-                            Text(spot.name).tag(Spot?.some(spot))
+                    Button {
+                        showSpotSearch = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: selectedSpot == nil ? "magnifyingglass" : "mappin.circle.fill")
+                                .foregroundStyle(Theme.accent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(selectedSpot?.name ?? "Search for a place")
+                                    .foregroundStyle(selectedSpot == nil ? Theme.textSecondary : Theme.textPrimary)
+                                if let address = selectedSpot?.address, !address.isEmpty {
+                                    Text(address)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.textSecondary)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                            if selectedSpot != nil {
+                                Text("Change")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.accent)
+                            }
                         }
                     }
                 }
@@ -677,7 +956,7 @@ struct NewActivitySheet: View {
                     TextField("What's the plan?", text: $note, axis: .vertical)
                     Stepper("Capacity: \(capacity)", value: $capacity, in: 2...50)
                     Toggle("Public activity", isOn: $isPublic)
-                        .tint(Theme.iris)
+                        .tint(Theme.accent)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -693,6 +972,9 @@ struct NewActivitySheet: View {
                         .disabled(selectedSpot == nil || note.isEmpty)
                 }
             }
+        }
+        .sheet(isPresented: $showSpotSearch) {
+            SpotSearchView { spot in selectedSpot = spot }
         }
         // Guard clause: posting a PUBLIC activity requires a public profile.
         .alert("Public Profile Required", isPresented: $showPrivacyAlert) {
@@ -715,8 +997,20 @@ struct NewActivitySheet: View {
         let beacon = Beacon(spot: selectedSpot, host: me, note: note,
                             startsAt: .now.addingTimeInterval(3600 * 2), capacity: capacity)
         beacon.isPublic = isPublic
+        beacon.hostUID = me.remoteUID
+        beacon.hostName = me.name
+        beacon.hostEmoji = me.emoji
+        beacon.hostAvatarURL = me.avatarURL
         modelContext.insert(beacon)
         try? modelContext.save()
+
+        // Local first, sync in the background — same bargain as sending a log.
+        // Blocking the sheet on a round trip would make creating a plan feel
+        // like a network operation, and the row is already on screen either way.
+        let context = modelContext
+        let sync = beaconSync
+        Task { await sync.publish(beacon, context: context) }
+
         dismiss()
     }
 }

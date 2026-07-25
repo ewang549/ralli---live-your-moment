@@ -21,7 +21,17 @@ service cloud.firestore {
     // (uid, handle, friendCode, createdAt, referredBy) are server-owned.
     function onlySoftProfileFields() {
       return request.resource.data.diff(resource.data).affectedKeys()
-        .hasOnly(['name', 'avatarEmoji', 'city', 'bio', 'interests', 'isPrivate', 'updatedAt']);
+        .hasOnly(['name', 'nameLower', 'avatarEmoji', 'avatarURL', 'city', 'bio',
+                  'interests', 'isPrivate', 'updatedAt']);
+    }
+
+    // `nameLower` exists only so search can run a prefix range over names. It
+    // is written by the client alongside `name`, so it has to be pinned to it
+    // here — otherwise anyone could make themselves findable under any name
+    // while displaying another.
+    function nameLowerMatches() {
+      return !('nameLower' in request.resource.data)
+        || request.resource.data.nameLower == request.resource.data.name.lower();
     }
 
     // users/{uid} — the public directory. Readable by any signed-in user so
@@ -30,10 +40,57 @@ service cloud.firestore {
       allow get, list: if signedIn();
       // Creation is createProfile()'s job: it claims the handle atomically.
       allow create, delete: if false;
-      allow update: if isSelf(uid) && onlySoftProfileFields();
+      allow update: if isSelf(uid) && onlySoftProfileFields() && nameLowerMatches();
 
-      // Subcollections (friends, requests, devices, blocked) are written only
-      // by Cloud Functions. Phase 2+ opens reads per-collection as they land.
+      // Friend graph. The owner reads their own edges directly — that's what
+      // backs the roster and the requests inbox — but every write goes through
+      // a callable, which is where the state validation and abuse guards live.
+      // A client that could write these could friend itself to anyone.
+      match /friends/{friendUid} {
+        allow read: if isSelf(uid);
+        allow write: if false;
+      }
+
+      match /incomingRequests/{fromUid} {
+        allow read: if isSelf(uid);
+        allow write: if false;
+      }
+
+      match /outgoingRequests/{toUid} {
+        allow read: if isSelf(uid);
+        allow write: if false;
+      }
+
+      match /blocked/{blockedUid} {
+        allow read: if isSelf(uid);
+        allow write: if false;
+      }
+
+      // Follow graph. Same shape as the friend edges above: the owner reads
+      // their own two subcollections, and every write goes through
+      // followUser / unfollowUser — which is also where `followerCount` is
+      // maintained, so a client that could write here could inflate its own
+      // follower count.
+      match /followers/{followerUid} {
+        allow read: if isSelf(uid);
+        allow write: if false;
+      }
+
+      match /following/{followingUid} {
+        allow read: if isSelf(uid);
+        allow write: if false;
+      }
+
+      // Push tokens. The only subcollection a client writes directly: the
+      // device is the sole holder of its own FCM token, and routing it through
+      // a callable would buy nothing. Scoped to the owner, and the document id
+      // is the token itself, so a client can only ever touch its own.
+      match /devices/{token} {
+        allow read, write, delete: if isSelf(uid);
+      }
+
+      // Anything else under a user (devices, logs, …) stays closed until the
+      // phase that introduces it opens it deliberately.
       match /{subcollection=**} {
         allow read, write: if false;
       }
@@ -46,6 +103,25 @@ service cloud.firestore {
     }
 
     match /friendCodes/{code} {
+      allow read, write: if false;
+    }
+
+    // Beacons. Closed in both directions, same as `logs`: every write is a
+    // callable (createBeacon / joinBeacon / leaveBeacon / deleteBeacon), which
+    // is where capacity, the friends-only guest list and the public-profile
+    // rule are enforced — a client that could write here could seat itself in a
+    // full activity or read a friends-only beacon it wasn't invited to. Reads
+    // go through listFriendBeacons / listPublicBeacons, which is what decides
+    // who sees which rows.
+    match /beacons/{beaconId} {
+      allow read, write: if false;
+    }
+
+    // Moderation queue. Written only by reportUser/reportContent through the
+    // Admin SDK. Closed to clients in both directions on purpose: a reporter
+    // must not be able to read (or edit) the queue, and a reported account must
+    // not be able to discover that a report exists.
+    match /reports/{reportId} {
       allow read, write: if false;
     }
 

@@ -137,6 +137,14 @@ private struct LogOverlay: View {
                 }
             }
             Spacer()
+            // Report/block the log itself. Only for content that actually came
+            // from someone else's account — there's nothing to report about a
+            // local capture or a demo row.
+            if clip.isRemote, !clip.remoteID.isEmpty, !clip.authorUID.isEmpty {
+                SafetyMenuButton(target: .log(id: clip.remoteID,
+                                              authorUid: clip.authorUID,
+                                              authorName: clip.author?.name ?? "this member"))
+            }
             if clipCount > 1 {
                 Text("\(clipIndex + 1)/\(clipCount)")
                     .font(.caption.weight(.semibold).monospacedDigit())
@@ -144,9 +152,10 @@ private struct LogOverlay: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(Capsule().fill(.black.opacity(0.35)))
-                    .padding(.trailing, 44)
             }
         }
+        // Room for the close button pinned at topTrailing by the player.
+        .padding(.trailing, 40)
         .padding(.horizontal, 16)
         .padding(.top, 54)
         .background(
@@ -177,7 +186,7 @@ private struct LogOverlay: View {
                 if chat.streak > 0 {
                     Text("🔥 \(chat.streak)")
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(Theme.iris)
+                        .foregroundStyle(Theme.accent)
                 }
             }
             if clipIndex == 0 && clipCount > 1 {
@@ -316,7 +325,7 @@ private struct GroupLogPage: View {
                 HStack(spacing: 4) {
                     ForEach(0..<latestPerMember.count, id: \.self) { index in
                         Capsule()
-                            .fill(index <= reelIndex ? Theme.iris : .white.opacity(0.3))
+                            .fill(index <= reelIndex ? Theme.accent : .white.opacity(0.3))
                             .frame(height: 3)
                     }
                 }
@@ -327,7 +336,7 @@ private struct GroupLogPage: View {
                     .foregroundStyle(.white)
                 Text("🔥 \(chat.streak)")
                     .font(.subheadline.weight(.bold))
-                    .foregroundStyle(Theme.iris)
+                    .foregroundStyle(Theme.accent)
                 Spacer()
                 Picker("Mode", selection: $mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }

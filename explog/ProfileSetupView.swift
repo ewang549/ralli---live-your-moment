@@ -15,6 +15,9 @@ struct ProfileSetupView: View {
     @State private var name = Auth.auth().currentUser?.displayName ?? ""
     @State private var city = ""
     @State private var avatar = "🧑‍💻"
+    /// Set the instant a photo's picked, ahead of the profile even existing —
+    /// stamped onto the cached local row once `submit()` creates it.
+    @State private var avatarPhotoFileName: String?
 
     @State private var availability: Availability = .idle
     @State private var busy = false
@@ -107,8 +110,15 @@ struct ProfileSetupView: View {
     private var identityCard: some View {
         GlassCard {
             VStack(spacing: 18) {
-                GlassOrbAvatar(emoji: avatar, hue: 0.58, size: 92, isActive: availability == .available)
-                    .padding(.top, 4)
+                AvatarPhotoButton(onPicked: { avatarPhotoFileName = $0 }) {
+                    ZStack(alignment: .bottomTrailing) {
+                        GlassOrbAvatar(emoji: avatar, hue: 0.58, size: 92,
+                                       isActive: availability == .available,
+                                       photoURL: avatarPhotoFileName.map { URL.documentsDirectory.appending(path: $0) })
+                        AvatarPhotoBadge()
+                    }
+                }
+                .padding(.top, 4)
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
@@ -119,11 +129,11 @@ struct ProfileSetupView: View {
                                     .frame(width: 42, height: 42)
                                     .background {
                                         Circle().fill(avatar == option
-                                                      ? Theme.irisWash : Theme.sunken)
+                                                      ? Theme.accentWash : Theme.sunken)
                                     }
                                     .overlay {
                                         Circle().strokeBorder(
-                                            avatar == option ? Theme.iris : .clear,
+                                            avatar == option ? Theme.accent : .clear,
                                             lineWidth: 1.5
                                         )
                                     }
@@ -138,7 +148,7 @@ struct ProfileSetupView: View {
                     HStack(spacing: 8) {
                         Text("@")
                             .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.iris)
+                            .foregroundStyle(Theme.accent)
                         TextField("handle", text: $handle)
                             .font(.system(size: 18, weight: .semibold, design: .rounded))
                             .foregroundStyle(Theme.textPrimary)
@@ -259,6 +269,22 @@ struct ProfileSetupView: View {
                     referredBy: PendingReferral.code
                 )
                 FirestoreService.cacheLocally(profile, context: modelContext)
+                if let avatarPhotoFileName {
+                    let descriptor = FetchDescriptor<Friend>()
+                    let me = (try? modelContext.fetch(descriptor))?.first { $0.remoteUID == profile.uid }
+                    me?.avatarPhotoFileName = avatarPhotoFileName
+                    try? modelContext.save()
+
+                    // The local file name alone is invisible to everyone else
+                    // and doesn't survive a reinstall — the photo only becomes
+                    // part of the account once it's in Storage and its URL is
+                    // on the profile. Awaited (behind the spinner that's
+                    // already up) so onboarding can't finish with the photo
+                    // still on the device only; `try?` because a failed upload
+                    // must not strand a user who has a valid account.
+                    let localURL = URL.documentsDirectory.appending(path: avatarPhotoFileName)
+                    try? await FirestoreService.uploadAvatarPhoto(at: localURL)
+                }
                 PendingReferral.code = nil
                 onComplete(profile)
             } catch let error as CallableFunctions.CallableError {

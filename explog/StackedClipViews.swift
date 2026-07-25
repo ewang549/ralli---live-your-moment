@@ -40,8 +40,12 @@ struct StackedClipPane: View {
     /// Extra space above the author chip so it clears the timestamp banner /
     /// status bar on whichever pane sits at the top of the screen.
     var headerTopPadding: CGFloat = 0
+    /// The real friend behind this pane, when tapping the author should open
+    /// their profile. Nil for "you" (nothing to view) and for placeholder panes.
+    var authorFriend: Friend?
 
     @Environment(ClipSyncClock.self) private var clock
+    @State private var showProfile = false
 
     var body: some View {
         ZStack {
@@ -50,7 +54,11 @@ struct StackedClipPane: View {
                     // Keying on the clock's cycle is what synchronizes the
                     // stack: every pane rebuilds its player on the same tick,
                     // so all clips restart together instead of drifting.
-                    .id("\(clip.id)-\(clock.cycle)")
+                    //
+                    // Video only. A photo has nothing to restart, and rebuilding
+                    // one every cycle made a remote photo re-fetch and flash its
+                    // `AsyncImage` placeholder — the emoji orb — on each tick.
+                    .id(clip.kind == .video ? "\(clip.id)-\(clock.cycle)" : "\(clip.id)")
             } else {
                 noClipPlaceholder
             }
@@ -58,6 +66,13 @@ struct StackedClipPane: View {
             // Legibility scrim — captions sit over live video.
             LinearGradient(colors: [.black.opacity(0.5), .clear, .black.opacity(0.55)],
                            startPoint: .top, endPoint: .bottom)
+
+            // The hour this log was filmed, burned across the middle of the
+            // frame — the same banner the camera and the review screen show,
+            // so a log carries one stamp from capture through to the feed.
+            if let capturedAt = clip?.capturedAt {
+                HourOverlay(date: capturedAt)
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 header
@@ -76,6 +91,9 @@ struct StackedClipPane: View {
         }
         .clipped()
         .contentShape(Rectangle())
+        .fullScreenCover(isPresented: $showProfile) {
+            if let authorFriend { PublicProfileSheet(friend: authorFriend) }
+        }
     }
 
     /// De-duplicated reaction chips (emoji + count) pinned bottom-left.
@@ -103,32 +121,43 @@ struct StackedClipPane: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            // Iris ring marks the author who actually posted this slot.
-            GlassOrbAvatar(emoji: authorEmoji, hue: authorHue, size: 32,
-                           isActive: clip != nil)
-            VStack(alignment: .leading, spacing: 1) {
-                if let authorName {
-                    Text(authorName)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(Theme.textPrimary)
-                        .shadow(color: .black.opacity(0.6), radius: 4)
+            Button {
+                guard authorFriend != nil else { return }
+                showProfile = true
+            } label: {
+                HStack(spacing: 9) {
+                    // Coral ring marks the author who actually posted this slot.
+                    GlassOrbAvatar(emoji: authorEmoji, hue: authorHue, size: 32,
+                                   isActive: clip != nil)
+                    VStack(alignment: .leading, spacing: 1) {
+                        if let authorName {
+                            Text(authorName)
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(Theme.textPrimary)
+                                .shadow(color: .black.opacity(0.6), radius: 4)
+                        }
+                        if let roleLabel {
+                            Text(roleLabel)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
                 }
-                if let roleLabel {
-                    Text(roleLabel)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.textSecondary)
-                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(authorFriend == nil)
+
             Spacer()
             if let capturedAt = clip?.capturedAt {
-                Text(capturedAt.clockTime)
+                Text(capturedAt.hourOnlyClockTime)
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Theme.iris)
+                    .foregroundStyle(Theme.accent)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background {
                         Capsule().fill(.ultraThinMaterial)
-                            .overlay { Capsule().strokeBorder(Theme.iris.opacity(0.3), lineWidth: 1) }
+                            .overlay { Capsule().strokeBorder(Theme.accent.opacity(0.3), lineWidth: 1) }
                     }
             }
         }
@@ -177,6 +206,7 @@ struct FriendPairFeedView: View {
     var startingFriend: Friend?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \Chat.createdAt) private var chats: [Chat]
     @State private var clock = ClipSyncClock()
     @State private var currentIndex: Int = 0
@@ -258,13 +288,15 @@ struct FriendPairFeedView: View {
                     authorName: friend.name,
                     authorEmoji: friend.emoji,
                     authorHue: friend.hue,
-                    roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId
+                    roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId,
+                    authorFriend: friend
                 )
             }
             .frame(height: cardHeight)
             .overlay(alignment: .bottomTrailing) {
-                FriendLogActions(clip: friend.latestClip, me: me, chat: chat(with: friend)) {
-                    replyChat = chat(with: friend)
+                FriendLogActions(clip: friend.latestClip, me: me,
+                                 resolveChat: { dmChat(with: friend) }) {
+                    replyChat = dmChat(with: friend)
                 }
                 .padding(16)
             }
@@ -297,10 +329,8 @@ struct FriendPairFeedView: View {
             )
     }
 
-    /// The 1-on-1 thread with this friend (falls back to any shared chat).
-    private func chat(with friend: Friend) -> Chat? {
-        chats.first { !$0.isGroup && $0.members.contains { $0.id == friend.id } }
-            ?? chats.first { $0.members.contains { $0.id == friend.id } }
+    private func dmChat(with friend: Friend) -> Chat? {
+        resolveDMChat(with: friend, me: me, chats: chats, context: modelContext)
     }
 
     /// Synchronized timestamp banner, pinned above both panes.
@@ -312,7 +342,7 @@ struct FriendPairFeedView: View {
 
             HStack(spacing: 7) {
                 GlowDot(size: 7, breathing: true)
-                Text(Date.now.clockTime)
+                Text(Date.now.hourOnlyClockTime)
                     .font(.system(size: 14, weight: .heavy, design: .rounded).monospacedDigit())
                     .foregroundStyle(.white)
             }
@@ -331,6 +361,29 @@ struct FriendPairFeedView: View {
     }
 }
 
+// MARK: - Thread resolution
+
+/// The 1-on-1 thread with `friend`, created if there isn't one yet.
+///
+/// The read-only lookup this replaces returned nil for a friend you'd accepted
+/// but never messaged or sent a log to — they have no `Chat` row until
+/// something makes one (see `Chat.dm`). That silently broke half of each action
+/// on their card: a reaction still added its badge, but the broadcast into the
+/// DM was skipped, and Reply opened nothing at all.
+///
+/// Call this from a button's action, never from `body`. Resolving it while
+/// rendering would write a chat row for every friend merely scrolled past.
+private func resolveDMChat(with friend: Friend, me: Friend?,
+                           chats: [Chat], context: ModelContext) -> Chat? {
+    guard let me else {
+        // No local "me" row yet — fall back to a read-only lookup rather than
+        // fabricating a thread with no sender in it.
+        return chats.first { !$0.isGroup && $0.members.contains { $0.id == friend.id } }
+            ?? chats.first { $0.members.contains { $0.id == friend.id } }
+    }
+    return Chat.dm(with: friend, me: me, in: context)
+}
+
 // MARK: - Friend log action overlay (reply + emoji reaction)
 
 /// The two vertically-stacked actions on the bottom-right of a friend's log
@@ -344,7 +397,11 @@ private struct FriendLogActions: View {
     let me: Friend?
     /// Thread this friend's log belongs to; a reaction is broadcast here so it
     /// also lands in the chat as a message. nil → badge-only (no thread).
-    var chat: Chat?
+    ///
+    /// A closure rather than a value because resolving it can *create* the
+    /// thread, and that must happen when the button is pressed — not while the
+    /// feed renders. See `FriendPairFeedView.dmChat(with:)`.
+    var resolveChat: () -> Chat?
     let onReply: () -> Void
 
     @Environment(\.modelContext) private var modelContext
@@ -411,7 +468,7 @@ private struct FriendLogActions: View {
 
     private func react(with emoji: String) {
         guard let clip else { return }
-        let mine = Reaction(emoji: emoji, authorName: me?.name ?? "Ethan")
+        let mine = Reaction(emoji: emoji, authorName: me?.name ?? "You")
         // Toggle: tapping the same reaction again removes it.
         withAnimation(.spring(duration: 0.3)) {
             if let index = clip.reactions.firstIndex(of: mine) {
@@ -421,7 +478,7 @@ private struct FriendLogActions: View {
                 // Broadcast the reaction into the chat thread — the same
                 // reaction shows up as a message overlaying this clip's
                 // preview. Only on add, so removing a reaction doesn't post.
-                if let chat {
+                if let chat = resolveChat() {
                     let message = Message.reaction(emoji, to: clip, from: me, in: chat)
                     modelContext.insert(message)
                     chat.messages.append(message)
@@ -556,13 +613,16 @@ struct GroupClipFeedView: View {
                 authorName: entry.friend.name,
                 authorEmoji: entry.friend.emoji,
                 authorHue: entry.friend.hue,
-                roleLabel: entry.friend.isMe ? "you" : nil
+                roleLabel: entry.friend.isMe ? "you" : nil,
+                authorFriend: entry.friend.isMe ? nil : entry.friend
             )
         }
         .frame(width: width, height: height)
         .overlay(alignment: .bottomTrailing) {
             if !entry.friend.isMe {
-                FriendLogActions(clip: entry.clip, me: me, chat: chat) {
+                // The group's own thread — it always exists, so there's
+                // nothing to create here.
+                FriendLogActions(clip: entry.clip, me: me, resolveChat: { chat }) {
                     replyChat = chat
                 }
                 .padding(14)
@@ -608,8 +668,14 @@ struct AllFriendsFeedView: View {
     let friends: [Friend]
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Chat.createdAt) private var chats: [Chat]
     @State private var clock = ClipSyncClock()
     @State private var currentIndex: Int = 0
+    /// The friend thread to open when Reply is tapped on a card.
+    @State private var replyChat: Chat?
+
+    private var me: Friend? { friends.first { $0.isMe } }
 
     private var entries: [Friend] {
         friends
@@ -631,10 +697,23 @@ struct AllFriendsFeedView: View {
                                 authorEmoji: friend.emoji,
                                 authorHue: friend.hue,
                                 roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId,
-                                headerTopPadding: 96
+                                headerTopPadding: 96,
+                                authorFriend: friend
                             )
                             .frame(width: proxy.size.width.safeDimension,
                                    height: proxy.size.height.safeDimension)
+                            // Same react + reply overlay the 1-on-1 and group
+                            // feeds carry. Without it this feed — the one that
+                            // shows every friend's log — was the only place you
+                            // could watch a friend's clip and not respond to it.
+                            .overlay(alignment: .bottomTrailing) {
+                                FriendLogActions(clip: friend.latestClip, me: me,
+                                                 resolveChat: { dmChat(with: friend) }) {
+                                    replyChat = dmChat(with: friend)
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 96)
+                            }
                             .scrollTransition(.interactive.threshold(.visible(0.9))) { view, phase in
                                 view
                                     .opacity(phase.isIdentity ? 1 : 0.5)
@@ -664,9 +743,16 @@ struct AllFriendsFeedView: View {
             .padding(.top, 8)
         }
         .environment(clock)
+        .sheet(item: $replyChat) { chat in
+            ChatDrawerView(chat: chat)
+        }
         .task { clock.start() }
         .onDisappear { clock.stop() }
         .preferredColorScheme(.dark)
+    }
+
+    private func dmChat(with friend: Friend) -> Chat? {
+        resolveDMChat(with: friend, me: me, chats: chats, context: modelContext)
     }
 
     /// Restarts every clip together whenever a swipe lands on a new page.

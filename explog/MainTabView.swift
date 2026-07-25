@@ -13,6 +13,13 @@ final class AppRouter {
     /// portrait restores it, so a rotate-to-camera round trip lands you exactly
     /// where you left off. Nil whenever we're not in the landscape camera.
     var previousTab: MainTabView.Tab?
+    /// Set by a "friend request" notification; Pulse presents the inbox.
+    var showRequestsInbox = false
+    /// Set by a "message" notification; Pulse opens that Stream channel.
+    var openThreadChannelId: String?
+    /// Set when a Highlights card is tapped on someone's public profile;
+    /// Places scrolls to and focuses this exact clip once it's the active tab.
+    var focusedPlaceClipId: UUID?
     /// State flag for the camera's orientation state machine. false = live
     /// recording screen (State 1: rotating to portrait exits the camera).
     /// true  = a photo/video has been captured and the Preview/Send screen is
@@ -40,8 +47,25 @@ struct MainTabView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var router = AppRouter()
     @State private var orientation = OrientationObserver()
+    /// The real friend graph (accepted friends + pending requests both ways).
+    /// Owned here so it survives tab switches and every surface sees one copy.
+    @State private var friendGraph = FriendGraph()
+    /// Log upload/download. Owned alongside the graph for the same reason.
+    @State private var logSync = LogSync()
+    /// The follow graph (one-directional, separate from friendships). Owned
+    /// here too so the Places Following tab and every public-profile sheet
+    /// read and write the same copy.
+    @State private var followGraph = FollowGraph()
+    /// Beacon publish/sync. Owned here for the same reason as the two above:
+    /// the feed, the create sheet and the detail sheet all act on one copy.
+    @State private var beaconSync = BeaconSync()
+    /// Push registration + the destination of a tapped notification.
+    @State private var push = PushNotifications.shared
+    @State private var showNotificationPrimer = false
     /// Injected by AuthGateView; seeding depends on *resolved* auth.
     @Environment(AuthSession.self) private var session
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isRetryingSends = false
 
     // Five surfaces, left to right: Profile · Pulse · Camera · Places · Beacons.
     enum Tab { case profile, pulse, places, beacons }
@@ -61,9 +85,32 @@ struct MainTabView: View {
             tabBar
         }
         .background(GlassBackground())
+        // Sends are fire-and-forget so the composer can dismiss instantly.
+        // This is the other half of that bargain: the one place a send that
+        // died on the network becomes visible after the fact. App-wide rather
+        // than on one screen, because the capture flow can dismiss you onto
+        // any tab.
+        .overlay(alignment: .top) { sendFailureBanner }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86),
+                   value: logSync.lastPublishError)
         .environment(router)
+        .environment(friendGraph)
+        .environment(logSync)
+        .environment(followGraph)
+        .environment(beaconSync)
+        // Notification priming, once, on the first run that reaches the app.
+        //
+        // Deliberately here and not at the end of onboarding: the auth gate can
+        // swap ProfileSetupView out from under itself the moment the profile
+        // resolves, which silently ate a sheet presented there — and a primer
+        // that sometimes doesn't appear is a permission that never gets asked
+        // for. MainTabView is the first screen that's stable.
+        .sheet(isPresented: $showNotificationPrimer) {
+            NotificationPrimerView { push.hasPrimed = true }
+                .interactiveDismissDisabled()
+        }
         .fullScreenCover(isPresented: Bindable(router).showCapture) {
-            CameraCaptureView(context: router.captureContext, router: router)
+            CameraCaptureView(context: router.captureContext, router: router, logSync: logSync)
         }
         // Turning the phone sideways *is* the shortcut to the camera. Landscape
         // remembers the tab you were on, then raises the landscape camera with
@@ -90,20 +137,202 @@ struct MainTabView: View {
         }
         .task {
             orientation.start()
+
+            // Before any network work: the primer doesn't depend on it, and
+            // sitting behind a slow sync is how it ends up never appearing.
+            await push.refreshAuthorizationStatus()
+            if push.shouldPrime { showNotificationPrimer = true }
+
             SeedData.seedIfNeeded(context: modelContext, session: session)
+            // Clear DMs left behind by un-friending before the fix that deletes
+            // them alongside the friend — otherwise they linger as "Just me".
+            Chat.pruneOrphanedDMs(in: modelContext)
+            // Real friendships land after seeding, so a real account's roster
+            // reflects the server even in a DEBUG build with demo data forced.
+            await friendGraph.refresh(context: modelContext)
+            // Friends' logs need the roster to exist first — a log whose author
+            // has no local row is dropped — so this follows the graph refresh.
+            await logSync.syncDown(context: modelContext)
+            // Catch up anything captured while offline.
+            await logSync.publishPending(context: modelContext)
+            // Who we follow — the Following tab under Places is built from it.
+            await followGraph.refresh()
 #if DEBUG
+            // CLI verification hook: SIMCTL_CHILD_EXPLOG_AUTO_POST="caption"
+            // captures a synthetic photo log and sends it through the real
+            // upload + publishLog path. The simulator has no camera, so this is
+            // the only way to exercise content sync end to end from the CLI.
+            if let caption = ProcessInfo.processInfo.environment["EXPLOG_AUTO_POST"] {
+                await postSyntheticLog(caption: caption)
+            }
+
             // CLI screenshot hooks: SIMCTL_CHILD_EXPLOG_AUTO_OPEN=profile|places|beacons|capture
             switch ProcessInfo.processInfo.environment["EXPLOG_AUTO_OPEN"] {
             case "profile": router.tab = .profile
-            case "places", "discover": router.tab = .places
-            case "beacons", "joined", "detail", "activitychat": router.tab = .beacons
+            case "places", "discover", "following": router.tab = .places
+            case "beacons", "joined", "detail", "activitychat", "publicbeacons", "newbeacon": router.tab = .beacons
             case "capture": router.openCapture(.pulse)
             default: break
             }
 #endif
         }
+        // Deep links from a tapped notification. Consumed here rather than in
+        // the gate so routing only happens once the app is actually signed in
+        // and the tabs exist to route to.
+        .onChange(of: push.pendingDestination) { _, destination in
+            guard let destination else { return }
+            open(destination)
+            push.pendingDestination = nil
+        }
+        .task(id: push.pendingDestination) {
+            // Covers a cold launch from a notification, where the destination
+            // is already set before this view is listening for changes.
+            if let destination = push.pendingDestination {
+                open(destination)
+                push.pendingDestination = nil
+            }
+        }
+        // Coming back to the app is the most likely moment for connectivity to
+        // have returned, so it's the cheapest place to recover a failed send
+        // before the user has to notice anything broke.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await logSync.publishPending(context: modelContext) }
+        }
         .onDisappear { orientation.stop() }
     }
+
+    // MARK: Failed sends
+
+    /// "That didn't send", with a way to fix it.
+    ///
+    /// Retrying is just `publishPending` — the same catch-up the app runs at
+    /// launch and on foreground — so the button asks for automatic recovery to
+    /// happen now rather than being a second, separate send path.
+    @ViewBuilder
+    private var sendFailureBanner: some View {
+        if let message = logSync.lastPublishError {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.amber)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(message)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(logSync.failedPublishCount > 1
+                         ? "\(logSync.failedPublishCount) logs are still on this device."
+                         : "It's still on this device.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    retryFailedSends()
+                } label: {
+                    Group {
+                        if isRetryingSends {
+                            ProgressView().tint(Theme.onAccent).scaleEffect(0.7)
+                        } else {
+                            Text("Retry").font(.caption.weight(.bold))
+                        }
+                    }
+                    .foregroundStyle(Theme.onAccent)
+                    .frame(minWidth: 46)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Theme.accent))
+                }
+                .disabled(isRetryingSends)
+
+                Button {
+                    logSync.clearPublishError()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .accessibilityLabel("Dismiss")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background { GlassCard(cornerRadius: 14) { Color.clear } }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    private func retryFailedSends() {
+        guard !isRetryingSends else { return }
+        isRetryingSends = true
+        Task {
+            await logSync.publishPending(context: modelContext)
+            isRetryingSends = false
+        }
+    }
+
+    /// Routes a tapped notification to the screen it's about.
+    private func open(_ destination: PushDestination) {
+        switch destination {
+        case .pulse:
+            router.tab = .pulse
+        case .requests:
+            router.tab = .pulse
+            router.showRequestsInbox = true
+        case .capture:
+            router.tab = .pulse
+            router.openCapture(.pulse)
+        case .thread(let channelId):
+            router.tab = .pulse
+            router.openThreadChannelId = channelId
+        }
+    }
+
+#if DEBUG
+    /// One-shot: `.task` re-runs whenever this view is remounted (every stage
+    /// change through the auth gate does it), and without this the hook posts a
+    /// fresh log each time.
+    @MainActor
+    private static var didAutoPost = false
+
+    /// Writes a real image file, wraps it in a `Clip` authored by the signed-in
+    /// user, and publishes it — the same path `SendToFriendsView` takes after a
+    /// capture, minus the camera.
+    private func postSyntheticLog(caption: String) async {
+        guard !Self.didAutoPost else { return }
+        Self.didAutoPost = true
+
+        let friends = (try? modelContext.fetch(FetchDescriptor<Friend>())) ?? []
+        guard let me = friends.first(where: \.isMe) else { return }
+
+        let size = CGSize(width: 900, height: 1600)
+        let image = UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor(red: 1.0, green: 0.35, blue: 0.37, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            let text = caption as NSString
+            text.draw(at: CGPoint(x: 60, y: 720), withAttributes: [
+                .font: UIFont.boldSystemFont(ofSize: 64),
+                .foregroundColor: UIColor.white,
+            ])
+        }
+        guard let data = image.jpegData(compressionQuality: 0.8) else { return }
+
+        let fileName = "\(UUID().uuidString).jpg"
+        let url = URL.documentsDirectory.appending(path: fileName)
+        try? data.write(to: url)
+
+        let clip = Clip(author: me, chat: nil, capturedAt: .now, kind: .photo,
+                        assetFileName: fileName, label: caption, emoji: "✨",
+                        hueA: 0.02, hueB: 0.08)
+        modelContext.insert(clip)
+        try? modelContext.save()
+
+        await logSync.publish(clip, context: modelContext)
+    }
+#endif
 
     /// A floating glass pill rather than a docked bar: it hovers over whatever
     /// the tab is showing (including full-bleed media on Places), so the content
@@ -149,12 +378,12 @@ struct MainTabView: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(Theme.iris)
+                    .fill(Theme.accent)
                     .frame(width: 52, height: 52)
-                    .shadow(color: Theme.iris.opacity(0.4), radius: 14, y: 3)
+                    .shadow(color: Theme.accent.opacity(0.4), radius: 14, y: 3)
                 Image(systemName: "camera.fill")
                     .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(Theme.onIris)
+                    .foregroundStyle(Theme.onAccent)
             }
             .frame(maxWidth: .infinity)
         }
@@ -170,12 +399,12 @@ struct MainTabView: View {
             VStack(spacing: 3) {
                 Image(systemName: icon)
                     .font(.system(size: 19, weight: .semibold))
-                    // Only the active tab is lit iris; the rest stay muted so the
+                    // Only the active tab is lit coral; the rest stay muted so the
                     // accent never reads as five competing highlights.
-                    .foregroundStyle(isActive ? Theme.iris : Theme.textSecondary)
+                    .foregroundStyle(isActive ? Theme.accent : Theme.textSecondary)
                 Text(title)
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(isActive ? Theme.iris : Theme.textSecondary.opacity(0.8))
+                    .foregroundStyle(isActive ? Theme.accent : Theme.textSecondary.opacity(0.8))
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())

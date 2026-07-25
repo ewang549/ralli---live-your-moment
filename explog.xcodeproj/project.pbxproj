@@ -12,6 +12,7 @@
 		AAABF3A830103C2400F9D18B /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3A730103C2400F9D18B /* FirebaseAuth */; };
 		AAABF3AA30103C2D00F9D18B /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3A930103C2D00F9D18B /* FirebaseFirestore */; };
 		AAABF3AC30103C3400F9D18B /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3AB30103C3400F9D18B /* FirebaseMessaging */; };
+		AAABF3AE30103C4000F9D18B /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = AAABF3AD30103C4000F9D18B /* FirebaseStorage */; };
 		AB91A4F03011803900162262 /* StreamChat in Frameworks */ = {isa = PBXBuildFile; productRef = AB91A4EF3011803900162262 /* StreamChat */; };
 /* End PBXBuildFile section */
 
@@ -62,6 +63,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AAABF3AC30103C3400F9D18B /* FirebaseMessaging in Frameworks */,
+				AAABF3AE30103C4000F9D18B /* FirebaseStorage in Frameworks */,
 				AAABF3A630103C1D00F9D18B /* FirebaseCore in Frameworks */,
 				AAABF3A830103C2400F9D18B /* FirebaseAuth in Frameworks */,
 				AA91A4E83011803800162262 /* StreamChatSwiftUI in Frameworks */,
@@ -139,6 +141,7 @@
 				AAABF3A730103C2400F9D18B /* FirebaseAuth */,
 				AAABF3A930103C2D00F9D18B /* FirebaseFirestore */,
 				AAABF3AB30103C3400F9D18B /* FirebaseMessaging */,
+				AAABF3AD30103C4000F9D18B /* FirebaseStorage */,
 				AA91A4E73011803800162262 /* StreamChatSwiftUI */,
 				AB91A4EF3011803900162262 /* StreamChat */,
 			);
@@ -421,6 +424,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = explog/explog.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 6JV8CSBD6P;
@@ -428,11 +434,13 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Ralli;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Ralli uses the camera to capture your 3-second logs.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Ralli uses your location to show nearby experiences and beacons.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Ralli records ambient sound with your video logs.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ralli saves your edited logs to your photo library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Ralli needs access to your photo library so you can share photos and videos in your logs.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -450,16 +458,18 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ej.explog;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TARGETED_DEVICE_FAMILY = "1,2";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
 			name = Debug;
@@ -469,6 +479,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = explog/explog.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 6JV8CSBD6P;
@@ -476,11 +489,13 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Ralli;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Ralli uses the camera to capture your 3-second logs.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Ralli uses your location to show nearby experiences and beacons.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Ralli records ambient sound with your video logs.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ralli saves your edited logs to your photo library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Ralli needs access to your photo library so you can share photos and videos in your logs.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -498,16 +513,18 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ej.explog;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TARGETED_DEVICE_FAMILY = "1,2";
 				XROS_DEPLOYMENT_TARGET = 26.5;
 			};
 			name = Release;
@@ -695,6 +712,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseMessaging;
+		};
+		AAABF3AD30103C4000F9D18B /* FirebaseStorage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAABF3A330103B8A00F9D18B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseStorage;
 		};
 		AB91A4EF3011803900162262 /* StreamChat */ = {
 			isa = XCSwiftPackageProductDependency;

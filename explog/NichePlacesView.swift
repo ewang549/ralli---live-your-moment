@@ -3,20 +3,61 @@ import SwiftData
 
 // MARK: - View A: Niche Places feed
 //
-// The iris showcase. A snapping full-screen vertical media feed: the clip is
+// The coral showcase. A snapping full-screen vertical media feed: the clip is
 // the backdrop, edge to edge, and everything else floats over it as glass and
-// iris — the right-hand action rail, the orb avatar with its iris ring, the
+// coral — the right-hand action rail, the orb avatar with its coral ring, the
 // follow chip, and the sequence scrubber marking your place in the spot's set.
+
+/// Which slice of the reels feed is on screen: everyone's clips, or only the
+/// highlights of accounts the current user follows.
+enum PlacesFeed: String, CaseIterable, Identifiable {
+    case main, following
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .main: "Public"
+        case .following: "Following"
+        }
+    }
+}
 
 struct NichePlacesView: View {
     @Query(sort: \SpotClip.capturedAt, order: .reverse) private var clips: [SpotClip]
+    @Environment(AppRouter.self) private var router
+    @Environment(FollowGraph.self) private var followGraph
+    @Environment(LogSync.self) private var logSync
+    @Environment(\.modelContext) private var modelContext
     @State private var visibleClipID: UUID?
+    @State private var feed: PlacesFeed = .main
+    @State private var showBookmarks = false
+
+    /// The Following feed: the Highlights of everyone this user follows, newest
+    /// first — the same clips their public profile's Highlights grid shows,
+    /// composed into one scroll.
+    ///
+    /// Matched by author name rather than uid because `SpotClip` carries a plain
+    /// name, which is exactly what `PublicProfileSheet.highlights` matches on
+    /// too. Both sides therefore agree on what counts as someone's highlight.
+    private var followedNames: Set<String> { followGraph.followedNames }
+
+    private var visibleClips: [SpotClip] {
+        switch feed {
+        case .main: clips
+        case .following:
+            clips.filter { clip in
+                // Same precedence the profile's Highlights grid uses: a real
+                // author uid wins, name matching only covers seed clips.
+                if !clip.authorUID.isEmpty { return followGraph.followedUIDs.contains(clip.authorUID) }
+                return followedNames.contains(clip.authorName.lowercased())
+            }
+        }
+    }
 
     var body: some View {
         GeometryReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
-                    ForEach(clips) { clip in
+                    ForEach(visibleClips) { clip in
                         PlacePage(clip: clip, isActive: visibleClipID == clip.id)
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             // The current clip is full and sharp; the one being
@@ -29,6 +70,8 @@ struct NichePlacesView: View {
                             }
                             .id(clip.id)
                     }
+
+                    if visibleClips.isEmpty { emptyFollowingState }
                 }
                 .scrollTargetLayout()
             }
@@ -43,31 +86,84 @@ struct NichePlacesView: View {
         // Places is the immersive media tab — it stays dark whatever the system
         // theme, so the glass chrome floats over full-bleed video correctly.
         .preferredColorScheme(.dark)
-        .onAppear { if visibleClipID == nil { visibleClipID = clips.first?.id } }
+        .onAppear { if visibleClipID == nil { visibleClipID = visibleClips.first?.id } }
+        // Reconcile who's followed on the way in, so the Following tab reflects
+        // follows made on another device (or before this tab first mounted).
+        .task { await followGraph.refresh() }
+        // Pull the real public feed. This is what makes Places show other
+        // people's posts rather than only whatever is in the local store.
+        .task { await logSync.syncPublicDown(context: modelContext) }
+#if DEBUG
+        // CLI screenshot hook, same family as EXPLOG_AUTO_OPEN elsewhere: the
+        // Following slice is only reachable by tapping the header toggle.
+        //   SIMCTL_CHILD_EXPLOG_AUTO_OPEN=following
+        .task {
+            guard ProcessInfo.processInfo.environment["EXPLOG_AUTO_OPEN"] == "following" else { return }
+            try? await Task.sleep(for: .seconds(1.2))
+            feed = .following
+        }
+#endif
+        .onChange(of: feed) { _, _ in visibleClipID = visibleClips.first?.id }
+        .sheet(isPresented: $showBookmarks) { BookmarkedPlacesView() }
+        // Deep link from a Highlights card on someone's public profile: land
+        // on their exact clip regardless of which feed slice was last active,
+        // since it might not be a friend's clip on the Following side.
+        .onChange(of: router.focusedPlaceClipId) { _, target in focus(on: target) }
+        .task(id: router.focusedPlaceClipId) { focus(on: router.focusedPlaceClipId) }
     }
 
-    /// Floating header: just the wordmark and the live "nearby" pill. The
-    /// per-spot sequence scrubber that used to sit under the logo has been
-    /// removed so the media feed anchors straight below the Ralli header.
+    private func focus(on target: UUID?) {
+        guard let target, clips.contains(where: { $0.id == target }) else { return }
+        feed = .main
+        withAnimation(.easeOut(duration: 0.2)) { visibleClipID = target }
+        router.focusedPlaceClipId = nil
+    }
+
+    /// Following with nobody followed yet — a friendly prompt rather than a
+    /// blank page. Also covers "followed people who haven't posted a highlight".
+    private var emptyFollowingState: some View {
+        VStack(spacing: 8) {
+            Text("👀").font(.system(size: 44))
+            Text(followGraph.following.isEmpty ? "Nobody followed yet" : "Nothing new here")
+                .font(.headline)
+                .foregroundStyle(.white)
+            Text(followGraph.following.isEmpty
+                 ? "Follow people to see their highlights here"
+                 : "Highlights from the people you follow will show up here")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 500)
+        .padding(.top, 120)
+    }
+
+    /// Floating header: the wordmark, the Public/Following feed toggle, and a
+    /// bookmarks button in the trailing corner (replacing the old static
+    /// "NEARBY NOW" pill, which didn't lead anywhere).
     private var topChrome: some View {
         HStack {
-            RalliWordmark(size: 24)
+            RalliWordmark()
             Spacer()
-            HStack(spacing: 6) {
-                GlowDot(size: 7, breathing: true)
-                Text("NEARBY NOW")
-                    .font(.system(size: 10, weight: .heavy, design: .rounded))
-                    .kerning(1.1)
-                    .foregroundStyle(Theme.textPrimary.opacity(0.85))
+            feedToggle
+            Spacer()
+            Button {
+                showBookmarks = true
+            } label: {
+                Image(systemName: "bookmark.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background {
+                        Circle().fill(.ultraThinMaterial)
+                            .overlay { Circle().strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1) }
+                    }
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background {
-                Capsule().fill(.ultraThinMaterial)
-                    .overlay { Capsule().strokeBorder(Theme.iris.opacity(0.35), lineWidth: 1) }
-            }
+            .accessibilityLabel("Bookmarked places")
         }
-        .padding(.horizontal, 18)
+        // Horizontal margin matches the Pulse header (16) so the wordmark sits
+        // at the exact same x-position tab to tab — no sideways shift on switch.
+        .padding(.horizontal, 16)
         .padding(.top, 60)
         .padding(.bottom, 12)
         .background {
@@ -77,6 +173,24 @@ struct NichePlacesView: View {
                 .allowsHitTesting(false)
         }
     }
+
+    /// "Public | Following" — bold white marks the active side, the inactive
+    /// side sits muted, switched with a tap. No pill background, matching the
+    /// plain-text toggle style used in the reference layout.
+    private var feedToggle: some View {
+        HStack(spacing: 16) {
+            ForEach(PlacesFeed.allCases) { option in
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { feed = option }
+                } label: {
+                    Text(option.title)
+                        .font(.system(size: 15, weight: feed == option ? .bold : .semibold, design: .rounded))
+                        .foregroundStyle(feed == option ? .white : .white.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
 }
 
 private struct PlacePage: View {
@@ -84,11 +198,18 @@ private struct PlacePage: View {
     let isActive: Bool
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(FollowGraph.self) private var followGraph
+    @Query private var friends: [Friend]
     @State private var showComments = false
     @State private var showShare = false
     @State private var showDetail = false
+    @State private var showProfile = false
     @State private var captionExpanded = false
-    @State private var isFollowing = false
+    /// Optimistic override held only for the length of a follow round trip.
+    /// `nil` means "read the graph", which is the real state — so the chip
+    /// survives a relaunch and can't drift from the profile sheet's button.
+    @State private var pendingFollow: Bool?
+    @State private var followWorking = false
 
     /// Handle derived from the author's display name — the seeded feed has no
     /// real accounts behind it, so this is presentation only.
@@ -97,11 +218,51 @@ private struct PlacePage: View {
             .replacingOccurrences(of: " ", with: "_")
     }
 
+    /// A roster match, when this author happens to already be a local friend
+    /// — lets the tap open the real profile sheet instead of a name-only one.
+    private var matchedFriend: Friend? {
+        friends.first { !$0.isMe && $0.name.caseInsensitiveCompare(clip.authorName) == .orderedSame }
+    }
+
+    /// The account behind this clip. Public clips carry their author directly;
+    /// falling back to a roster match keeps seed clips by an existing friend
+    /// actionable. Empty means there's no real account to act on.
+    private var authorUID: String {
+        clip.authorUID.isEmpty ? (matchedFriend?.remoteUID ?? "") : clip.authorUID
+    }
+
+    /// Following is only offered when there's someone real to follow — seed
+    /// clips have no account, and a chip that can't do anything is worse than
+    /// no chip.
+    private var canFollow: Bool { !authorUID.isEmpty }
+
+    private var isFollowing: Bool { pendingFollow ?? followGraph.isFollowing(authorUID) }
+
+    /// Enough of a profile for the follow call and for the Following list to
+    /// render this author before the next refresh replaces it with the
+    /// server's copy.
+    private var authorProfile: RemoteProfile {
+        RemoteProfile(uid: authorUID,
+                      handle: "",
+                      handleDisplay: "",
+                      name: clip.authorName,
+                      avatarEmoji: clip.emoji,
+                      city: "",
+                      bio: "",
+                      isPrivate: false)
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             // The media is the backdrop; every control below floats over it.
-            VibeClipView(emoji: clip.emoji, label: clip.label,
-                         hueA: clip.hueA, hueB: clip.hueB, animate: isActive)
+            // Real upload when there is one, the stylized vibe when there isn't.
+            //
+            // `.fit` over black, the same treatment the post-capture review
+            // uses: Ralli captures are landscape, so filling this portrait page
+            // cropped a horizontal clip down to a vertical slice of itself.
+            // Letterboxing shows what was actually filmed.
+            ClipMediaView(spotClip: clip, isActive: isActive, contentMode: .fit)
+                .background(Color.black)
                 .ignoresSafeArea()
 
             // Keeps the glass and the caption legible over bright footage.
@@ -123,6 +284,43 @@ private struct PlacePage: View {
         .sheet(isPresented: $showShare) { SharePlaceSheet(clip: clip) }
         .sheet(isPresented: $showDetail) {
             if let spot = clip.spot { SpotDetailView(spot: spot) }
+        }
+        .fullScreenCover(isPresented: $showProfile) {
+            if let matchedFriend {
+                PublicProfileSheet(friend: matchedFriend)
+            } else {
+                // `authorUID` is the clip's real author when it has one. It's
+                // still empty for seed clips, which the sheet already handles
+                // by hiding the action row rather than offering dead controls.
+                PublicProfileSheet(uid: authorUID, name: clip.authorName, emoji: clip.emoji)
+            }
+        }
+    }
+
+    /// Follows or unfollows this clip's author through the same `FollowGraph`
+    /// the profile sheet's Follow button uses, so the two can never disagree —
+    /// and so the Following tab, which reads that graph, updates immediately.
+    ///
+    /// The override is cleared either way once the call settles: on success the
+    /// graph already holds the new state, and on failure it was never changed,
+    /// so dropping back to it *is* the rollback.
+    private func toggleFollow() {
+        guard canFollow, !followWorking else { return }
+        let wasFollowing = isFollowing
+        let profile = authorProfile
+
+        withAnimation(.easeOut(duration: 0.18)) { pendingFollow = !wasFollowing }
+        followWorking = true
+
+        Task {
+            defer { followWorking = false }
+            do {
+                _ = wasFollowing ? try await followGraph.unfollow(profile)
+                                 : try await followGraph.follow(profile)
+            } catch {
+                // Nothing to undo — the graph is untouched when the call throws.
+            }
+            withAnimation(.easeOut(duration: 0.18)) { pendingFollow = nil }
         }
     }
 
@@ -155,22 +353,33 @@ private struct PlacePage: View {
     private var attribution: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                // Iris ring: this clip's author, lit against the media.
-                GlassOrbAvatar(emoji: clip.emoji, hue: clip.hueA, size: 42, isActive: true)
+                Button {
+                    showProfile = true
+                } label: {
+                    HStack(spacing: 10) {
+                        // Coral ring: this clip's author, lit against the media.
+                        GlassOrbAvatar(emoji: clip.emoji, hue: clip.hueA, size: 42, isActive: true)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(clip.authorName)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(Theme.textPrimary)
-                    Text("\(handle) · \(clip.capturedAt.relativeHour)")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.textSecondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(clip.authorName)
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("\(handle) · \(clip.capturedAt.relativeHour)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
 
-                AccentChip(title: isFollowing ? "Following" : "Follow",
-                         systemImage: isFollowing ? "checkmark" : "plus",
-                         isFilled: isFollowing) {
-                    isFollowing.toggle()
+                if canFollow {
+                    AccentChip(title: isFollowing ? "Following" : "Follow",
+                             systemImage: isFollowing ? "checkmark" : "plus",
+                             isFilled: isFollowing) {
+                        toggleFollow()
+                    }
+                    .disabled(followWorking)
                 }
             }
             .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
@@ -188,7 +397,7 @@ private struct PlacePage: View {
                         HStack(spacing: 6) {
                             Image(systemName: "mappin.circle.fill")
                                 .font(.system(size: 13))
-                                .foregroundStyle(Theme.iris)
+                                .foregroundStyle(Theme.accent)
                             Text(spot.name)
                                 .font(.system(size: 14, weight: .bold, design: .rounded))
                                 .foregroundStyle(Theme.textPrimary)
@@ -217,7 +426,7 @@ private struct PlacePage: View {
             } label: {
                 Text(captionExpanded ? "See less" : "See more")
                     .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.irisSoft)
+                    .foregroundStyle(Theme.accentSoft)
             }
             .buttonStyle(.plain)
         }
@@ -316,6 +525,7 @@ struct SharePlaceSheet: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(AppRouter.self) private var router
+    @Environment(BeaconSync.self) private var beaconSync
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Chat.createdAt) private var chats: [Chat]
     @Query private var friends: [Friend]
@@ -350,7 +560,7 @@ struct SharePlaceSheet: View {
                     } label: {
                         HStack {
                             Image(systemName: "dot.radiowaves.left.and.right")
-                                .foregroundStyle(beaconPosted ? .green : Theme.iris)
+                                .foregroundStyle(beaconPosted ? .green : Theme.accent)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(beaconPosted ? "Beacon posted" : "Post as public beacon")
                                     .font(.subheadline.weight(.semibold))
@@ -369,7 +579,7 @@ struct SharePlaceSheet: View {
                             GlassCard(cornerRadius: 14) { Color.clear }
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                        .strokeBorder(Theme.iris.opacity(0.45), lineWidth: 1)
+                                        .strokeBorder(Theme.accent.opacity(0.45), lineWidth: 1)
                                 }
                         }
                     }
@@ -414,7 +624,7 @@ struct SharePlaceSheet: View {
                                 .foregroundStyle(.green)
                         } else {
                             Image(systemName: "paperplane")
-                                .foregroundStyle(Theme.iris)
+                                .foregroundStyle(Theme.accent)
                         }
                     }
                     .padding(14)
@@ -449,8 +659,20 @@ struct SharePlaceSheet: View {
                             startsAt: .now.addingTimeInterval(3600 * 2),
                             capacity: 10)
         beacon.isPublic = true
+        beacon.hostUID = me.remoteUID
+        beacon.hostName = me.name
+        beacon.hostEmoji = me.emoji
+        beacon.hostAvatarURL = me.avatarURL
         modelContext.insert(beacon)
         try? modelContext.save()
+
+        // Same local-first publish as the Beacons tab's create sheet — a beacon
+        // started from a place is the same beacon, and leaving this path local
+        // would mean nobody ever saw one posted from here.
+        let context = modelContext
+        let sync = beaconSync
+        Task { await sync.publish(beacon, context: context) }
+
         beaconPosted = true
     }
 }
@@ -485,7 +707,7 @@ struct SpotDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Insight", systemImage: "sparkles")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.iris)
+                            .foregroundStyle(Theme.accent)
                         Text(spot.aiInsight)
                             .font(.subheadline)
                             .foregroundStyle(Theme.textPrimary.opacity(0.85))
@@ -505,8 +727,10 @@ struct SpotDetailView: View {
                         HStack(spacing: 10) {
                             ForEach(spot.perspectives.sorted { $0.capturedAt > $1.capturedAt }, id: \.id) { clip in
                                 VStack(alignment: .leading, spacing: 4) {
-                                    VibeClipView(emoji: clip.emoji, label: clip.label,
-                                                 hueA: clip.hueA, hueB: clip.hueB)
+                                    // Thumbnails aren't the focus of this sheet,
+                                    // so video stays paused — it still shows its
+                                    // first frame rather than a placeholder.
+                                    ClipMediaView(spotClip: clip, isActive: false)
                                         .frame(width: 120, height: 180)
                                         .clipShape(RoundedRectangle(cornerRadius: 14))
                                     Text(clip.label)
@@ -527,10 +751,10 @@ struct SpotDetailView: View {
                     } label: {
                         Label("Share this spot", systemImage: "paperplane.fill")
                             .font(.headline)
-                            .foregroundStyle(Theme.onIris)
+                            .foregroundStyle(Theme.onAccent)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
-                            .background(Capsule().fill(Theme.iris))
+                            .background(Capsule().fill(Theme.accent))
                     }
                     .padding(.top, 6)
                 }

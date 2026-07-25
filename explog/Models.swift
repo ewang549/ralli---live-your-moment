@@ -1,9 +1,6 @@
 import Foundation
 import SwiftData
 
-/// How long a sender must wait between logs to the same chat.
-let logCooldown: TimeInterval = 3600
-
 /// Where a capture was started from. The surface decides how long you get to
 /// record: a pulse check-in is a glance, a place is worth a few extra seconds.
 enum CaptureContext {
@@ -71,6 +68,20 @@ final class Friend {
     /// cannot host or join public activities (enforced by guard clauses).
     var isPrivate: Bool = false
 
+    /// A real profile photo, when one's been picked — takes over from the
+    /// emoji/gradient orb everywhere an avatar renders. File name inside the
+    /// app's Documents directory, same convention as `Clip.assetFileName`.
+    /// Defaulted so this is a lightweight SwiftData migration for rows
+    /// written before photo avatars existed.
+    var avatarPhotoFileName: String? = nil
+
+    /// The friend's uploaded profile photo (Storage download URL), synced from
+    /// their `RemoteProfile`. `avatarPhotoFileName` only ever gets set for a
+    /// photo picked *on this device*, so without this a friend's real photo
+    /// existed nowhere in the local model and every avatar fell back to the
+    /// emoji orb. Empty when they haven't set one.
+    var avatarURL: String = ""
+
     // Explicit inverses — without these, SwiftData infers a to-one inverse and
     // silently drops a friend from a chat when they join a second one.
     var chats: [Chat]
@@ -128,6 +139,12 @@ final class Friend {
         let value = userId.isEmpty ? handle : userId
         return value.isEmpty ? "" : "@\(value)"
     }
+
+    /// On-device location of the picked profile photo, when there is one.
+    var avatarPhotoURL: URL? {
+        guard let avatarPhotoFileName else { return nil }
+        return URL.documentsDirectory.appending(path: avatarPhotoFileName)
+    }
 }
 
 @Model
@@ -142,6 +159,11 @@ final class Chat {
     var createdAt: Date
     @Relationship(deleteRule: .cascade, inverse: \Clip.chat) var clips: [Clip]
     @Relationship(deleteRule: .cascade, inverse: \Message.chat) var messages: [Message]
+
+    /// When the current user last opened this thread. Defaulted so this is a
+    /// lightweight migration for chats written before the read cursor existed.
+    /// Nil means "never opened" — everything in the chat still counts as new.
+    var lastReadAt: Date? = nil
 
     init(title: String? = nil, isGroup: Bool, members: [Friend], streak: Int = 0, lastSentAt: Date? = nil) {
         self.id = UUID()
@@ -162,9 +184,19 @@ final class Chat {
     }
 
     /// Seconds until the current user may log to this chat again; 0 when ready.
+    ///
+    /// Top-of-hour, not a rolling 60 minutes: one send per *clock* hour, and
+    /// availability returns at the next `:00` rather than an hour after
+    /// whenever you last sent. This is the same definition Pulse's hourly
+    /// banner already used for `postedThisHour`, so the two mechanisms that
+    /// used to disagree about "can I post now" are now one rule.
     var cooldownRemaining: TimeInterval {
-        guard let lastSentAt else { return 0 }
-        return max(0, logCooldown - Date.now.timeIntervalSince(lastSentAt))
+        guard let lastSentAt,
+              Calendar.current.isDate(lastSentAt, equalTo: .now, toGranularity: .hour) else { return 0 }
+        let nextHour = Calendar.current.nextDate(after: .now,
+                                                 matching: DateComponents(minute: 0, second: 0),
+                                                 matchingPolicy: .nextTime) ?? .now
+        return max(0, nextHour.timeIntervalSince(.now))
     }
 
     var sortedClips: [Clip] {
@@ -196,6 +228,83 @@ final class Chat {
     func latestClip(by friend: Friend) -> Clip? {
         sortedClips.first { $0.author?.id == friend.id }
     }
+
+    // MARK: - Read state (Pulse chat-row unread dot)
+
+    /// The most recent thing that happened here — a log, a message, or (for a
+    /// brand-new chat) just its creation. The single timestamp both the
+    /// unread dot and the message-list ordering key off of, so they never
+    /// disagree about what "most recent" means.
+    var lastActivityAt: Date {
+        max(sortedClips.first?.capturedAt ?? .distantPast,
+            messages.map(\.sentAt).max() ?? .distantPast,
+            createdAt)
+    }
+
+    /// True when something's landed here since the current user last opened
+    /// the thread. This is the one source of truth for the row's unread dot —
+    /// set `lastReadAt` when the thread is opened and it clears immediately,
+    /// and stays cleared until genuinely new activity arrives.
+    ///
+    /// A chat with no clips and no messages has nothing to be unread — without
+    /// this guard, `lastActivityAt` falls back to `createdAt`, which sits after
+    /// a fresh chat's nil `lastReadAt` and lit the dot the instant the chat
+    /// (often auto-created by the row's message button) came into existence.
+    var hasUnread: Bool {
+        guard !clips.isEmpty || !messages.isEmpty else { return false }
+        return lastActivityAt > (lastReadAt ?? .distantPast)
+    }
+
+    /// Call when the user opens this thread. Idempotent enough to call from
+    /// `onAppear` — repeatedly stamping "now" while already caught up is harmless.
+    func markRead() {
+        lastReadAt = .now
+    }
+}
+
+// MARK: - DM lookup
+
+extension Chat {
+    /// The 1-on-1 chat with `friend`, created if this is the first time anyone
+    /// asked for it.
+    ///
+    /// Every entry point into a DM — Pulse rows, a profile's Message button, a
+    /// beacon host, the Send Log audience list — goes through here. A local
+    /// `Chat` is what makes someone reachable at all, and it used to be created
+    /// ad hoc by whichever screen you happened to open first: a friend you'd
+    /// just accepted but never visited had no row, so Send Log had nothing to
+    /// list and there was nothing to open a thread from. One shared get-or-create
+    /// means a friendship is enough, and every caller lands on the same row —
+    /// and so the same deterministic Stream channel.
+    static func dm(with friend: Friend, me: Friend, in context: ModelContext) -> Chat {
+        let existing = (try? context.fetch(FetchDescriptor<Chat>()))?.first { chat in
+            !chat.isGroup && chat.members.contains { $0.id == friend.id }
+        }
+        if let existing { return existing }
+
+        let chat = Chat(isGroup: false, members: [me, friend])
+        context.insert(chat)
+        try? context.save()
+        return chat
+    }
+
+    /// Deletes 1-on-1 chats that have lost the person they were with.
+    ///
+    /// `Chat.members` has no cascade rule, so deleting a `Friend` row (which is
+    /// what un-friending does) silently drops them out of the members array and
+    /// leaves the chat behind with only "me" in it — a row that renders forever
+    /// as "Just me". Nothing ever intentionally creates a solo chat, so any
+    /// non-group chat with no other member is one of these leftovers and is safe
+    /// to remove. Run at launch to clear ones that predate the fix; `FriendGraph`
+    /// prevents new ones at the point the friend is deleted.
+    static func pruneOrphanedDMs(in context: ModelContext) {
+        let orphaned = ((try? context.fetch(FetchDescriptor<Chat>())) ?? []).filter { chat in
+            !chat.isGroup && !chat.members.contains { !$0.isMe }
+        }
+        guard !orphaned.isEmpty else { return }
+        for chat in orphaned { context.delete(chat) }
+        try? context.save()
+    }
 }
 
 enum ClipKind: String, Codable {
@@ -222,6 +331,38 @@ final class Clip {
     var hueB: Double
     var reactions: [Reaction]
 
+    // MARK: Sync (Phase 2: content sync)
+    //
+    // A clip starts life local-only and becomes shared once its media is in
+    // Storage and a `logs/{id}` doc exists. Defaulted so this is a lightweight
+    // SwiftData migration for stores written before logs synced.
+
+    /// `logs/{remoteID}` in Firestore. Empty until published.
+    var remoteID: String = ""
+    /// Storage download URL for the media. Empty for local-only and vibe clips.
+    var remoteURLString: String = ""
+    /// Author's Firebase uid. Set on both published and downloaded clips, so a
+    /// synced clip still knows who made it even before its `Friend` row exists.
+    var authorUID: String = ""
+    /// True for a clip pulled down from a friend rather than captured here.
+    var isRemote: Bool = false
+    /// The spot this clip was meant to be posted publicly to, when it was.
+    ///
+    /// Kept on the clip rather than only passed to `publish` so a retry knows
+    /// the intended audience: without it, a public post whose first upload
+    /// failed would be silently re-published to friends instead.
+    var intendedSpotID: String = ""
+
+    /// True once an upload attempt has actually failed, as opposed to not
+    /// having happened yet.
+    ///
+    /// `remoteID.isEmpty` alone can't tell "still on its way up" from "gave
+    /// up" — and that distinction is the whole difference between a send the
+    /// user should wait on and one they need to know about. Cleared when a
+    /// retry starts, so the banner reflects the current attempt rather than an
+    /// old one.
+    var publishFailed: Bool = false
+
     init(author: Friend?, chat: Chat?, capturedAt: Date, kind: ClipKind,
          assetFileName: String? = nil, label: String, emoji: String,
          hueA: Double, hueB: Double, reactions: [Reaction] = []) {
@@ -240,9 +381,50 @@ final class Clip {
 
     var kind: ClipKind { ClipKind(rawValue: kindRaw) ?? .vibe }
 
+    /// On-device media. Nil for clips that only exist on the server.
     var assetURL: URL? {
         guard let assetFileName else { return nil }
         return URL.documentsDirectory.appending(path: assetFileName)
+    }
+
+    /// Media in Storage, once published or downloaded.
+    var remoteURL: URL? {
+        remoteURLString.isEmpty ? nil : URL(string: remoteURLString)
+    }
+
+    /// What a player should actually load: the local file when it's really on
+    /// disk, otherwise the uploaded copy. Keeping the local file first means
+    /// your own just-captured log plays instantly instead of round-tripping
+    /// through Storage.
+    var playbackURL: URL? {
+        if let assetURL, FileManager.default.fileExists(atPath: assetURL.path) {
+            return assetURL
+        }
+        return remoteURL
+    }
+
+    /// Whether this clip's media has reached the server.
+    var isPublished: Bool { !remoteID.isEmpty }
+
+    /// How far this capture got on its way to the recipient.
+    ///
+    /// `.pending` and `.failed` look identical in the store apart from
+    /// `publishFailed`, and conflating them is what made a dead send
+    /// indistinguishable from a slow one. Read by the UI; the fetch predicates
+    /// in `LogSync` match on the stored fields directly, since `#Predicate`
+    /// can't call a computed property.
+    enum SendState {
+        /// Captured, not yet acknowledged by the server — still on its way.
+        case pending
+        /// The server has it; recipients can see it.
+        case published
+        /// An upload attempt failed. Local-only until a retry succeeds.
+        case failed
+    }
+
+    var sendState: SendState {
+        if isPublished { return .published }
+        return publishFailed ? .failed : .pending
     }
 }
 
@@ -307,6 +489,16 @@ final class Spot {
     var distanceMiles: Double
     /// Street address shown in activity detail sheets.
     var address: String = ""
+    /// `spots/{id}` on the server. Empty for seed rows, which never left the
+    /// device; every spot created through location search carries one, which is
+    /// what lets a second account find the same place.
+    var remoteID: String = ""
+    /// Coordinates from the location search that created this spot. Both zero
+    /// when unknown (seed data), which `hasCoordinate` distinguishes from a
+    /// genuine null-island fix.
+    var latitude: Double = 0
+    var longitude: Double = 0
+    var hasCoordinate: Bool = false
     var emoji: String
     var hueA: Double
     var hueB: Double
@@ -340,6 +532,25 @@ final class SpotClip {
     @Attribute(.unique) var id: UUID
     var spot: Spot?
     var authorName: String
+    /// The author's account uid. Empty for legacy/seed clips, which predate
+    /// public posting and have no real account behind them — every screen that
+    /// acts on the author (Follow, profile sheet) must tolerate that.
+    var authorUID: String = ""
+    /// `logs/{id}` on the server, for clips pulled from the public feed. Empty
+    /// for clips that only exist locally.
+    var remoteID: String = ""
+    /// Download URL of the clip's media, when it has any.
+    var remoteURLString: String = ""
+    /// What kind of media this is, same convention as `Clip.kindRaw`. Places
+    /// rows carried a media URL but nothing said whether it was a photo or a
+    /// video, so every card rendered the vibe placeholder. Defaults to `.vibe`,
+    /// which is both a lightweight SwiftData migration and exactly the old
+    /// behavior for rows published before the kind was recorded.
+    var kindRaw: String = ClipKind.vibe.rawValue
+    /// File name inside the app's Documents directory, for a clip captured on
+    /// this device — so your own post shows its real media immediately rather
+    /// than waiting on the upload to come back.
+    var assetFileName: String? = nil
     var label: String
     var emoji: String
     var hueA: Double
@@ -353,16 +564,34 @@ final class SpotClip {
     var savedByMe: Bool = false
     var comments: [ClipComment] = []
 
-    init(spot: Spot?, authorName: String, label: String, emoji: String,
-         hueA: Double, hueB: Double, capturedAt: Date) {
+    init(spot: Spot?, authorName: String, authorUID: String = "",
+         label: String, emoji: String,
+         hueA: Double, hueB: Double, capturedAt: Date,
+         kind: ClipKind = .vibe, assetFileName: String? = nil) {
         self.id = UUID()
         self.spot = spot
         self.authorName = authorName
+        self.authorUID = authorUID
         self.label = label
         self.emoji = emoji
         self.hueA = hueA
         self.hueB = hueB
         self.capturedAt = capturedAt
+        self.kindRaw = kind.rawValue
+        self.assetFileName = assetFileName
+    }
+
+    var kind: ClipKind { ClipKind(rawValue: kindRaw) ?? .vibe }
+
+    /// On-device media. Nil for clips that only exist on the server.
+    var assetURL: URL? {
+        guard let assetFileName else { return nil }
+        return URL.documentsDirectory.appending(path: assetFileName)
+    }
+
+    /// Media in Storage, once published or downloaded.
+    var remoteURL: URL? {
+        remoteURLString.isEmpty ? nil : URL(string: remoteURLString)
     }
 }
 
@@ -380,6 +609,33 @@ final class Beacon {
     /// profile to host or join; false = shared with friends only.
     var isPublic: Bool = false
 
+    // MARK: Sync
+    //
+    // A beacon starts local and becomes shared once `beacons/{remoteID}` exists.
+    // All defaulted, so this is a lightweight SwiftData migration for stores
+    // written while beacons were device-only.
+
+    /// `beacons/{remoteID}` in Firestore. Empty until published, and on seeded
+    /// demo rows, which never leave the device.
+    var remoteID: String = ""
+
+    /// Host identity, denormalised.
+    ///
+    /// `host` is a local `Friend`, and a public beacon's host is usually someone
+    /// the viewer has no relationship with — so there is no row to hang it off.
+    /// These carry enough to draw the card either way.
+    var hostUID: String = ""
+    var hostName: String = ""
+    var hostEmoji: String = ""
+    var hostAvatarURL: String = ""
+
+    /// Everyone who has RSVP'd, as account uids — the roster of record.
+    ///
+    /// `joined` can only hold attendees this device has a `Friend` row for, so
+    /// on a public beacon it is usually a subset. Counting off that would show
+    /// "1/8" on an activity the server considers full.
+    var joinedUIDs: [String] = []
+
     init(spot: Spot?, host: Friend?, note: String, startsAt: Date, capacity: Int, joined: [Friend] = []) {
         self.id = UUID()
         self.spot = spot
@@ -390,9 +646,16 @@ final class Beacon {
         self.joined = joined
     }
 
-    var isFull: Bool { joined.count >= capacity }
+    /// How many people are in, counting attendees this device has no `Friend`
+    /// row for. Local-only beacons (seed data) carry no uids and fall back to
+    /// the relationship, which is all they ever had.
+    var attendeeCount: Int { max(joinedUIDs.count, joined.count) }
 
-    /// Everyone in the activity: host first, then RSVPs.
+    var isFull: Bool { attendeeCount >= capacity }
+
+    /// Everyone in the activity we can actually draw: host first, then RSVPs.
+    /// Attendees without a local `Friend` row are counted by `attendeeCount`
+    /// but have no avatar to show.
     var attendees: [Friend] {
         var roster: [Friend] = []
         if let host { roster.append(host) }
@@ -404,10 +667,12 @@ final class Beacon {
     var activityKey: String { id.uuidString }
 
     func hasJoined(_ friend: Friend) -> Bool {
-        joined.contains { $0.id == friend.id }
+        if !friend.remoteUID.isEmpty && joinedUIDs.contains(friend.remoteUID) { return true }
+        return joined.contains { $0.id == friend.id }
     }
 
     func isAttending(_ friend: Friend) -> Bool {
-        hasJoined(friend) || host?.id == friend.id
+        if !friend.remoteUID.isEmpty && hostUID == friend.remoteUID { return true }
+        return hasJoined(friend) || host?.id == friend.id
     }
 }

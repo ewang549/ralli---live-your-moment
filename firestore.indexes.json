@@ -1,4 +1,46 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorUid", "order": "ASCENDING" },
+        { "fieldPath": "capturedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "audience", "order": "ASCENDING" },
+        { "fieldPath": "capturedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "audience", "order": "ASCENDING" },
+        { "fieldPath": "spotId", "order": "ASCENDING" },
+        { "fieldPath": "capturedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "beacons",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "hostUid", "order": "ASCENDING" },
+        { "fieldPath": "startsAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "beacons",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isPublic", "order": "ASCENDING" },
+        { "fieldPath": "startsAt", "order": "ASCENDING" }
+      ]
+    }
+  ],
   "fieldOverrides": []
 }

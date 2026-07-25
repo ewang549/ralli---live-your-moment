@@ -41,9 +41,9 @@ extension Color {
 /// Ralli's "Warm Modern" palette.
 ///
 /// The feeling is warm, calm, human: a paper-warm canvas, one confident accent
-/// (iris) with personality, generous rounded shapes, real whitespace, restraint.
+/// (coral) with personality, generous rounded shapes, real whitespace, restraint.
 /// No gold, no pure black, no heavy chrome. Colour earns attention because most
-/// of the screen is quiet neutral — aim for one primary iris action per screen.
+/// of the screen is quiet neutral — aim for one primary accent action per screen.
 ///
 /// Every token is dual-mode: light-first for browsing, beautiful in dark. Glass
 /// is a garnish reserved for the floating nav and media overlays; everywhere else
@@ -81,44 +81,37 @@ enum Theme {
     /// Subtle border — a last resort when a tonal step isn't enough.
     static let hairline = Color(light: Color(hex: 0xE8E3DB), dark: Color(white: 1, opacity: 0.08))
 
-    // MARK: - Iris (the one brand accent)
+    // MARK: - Accent (the ONE brand accent — Coral)
     //
-    // Primary actions, active states, links, brand. On any screen, one primary
-    // iris action leads. Never a large flat iris fill behind lots of text — use
-    // `irisWash` for tinted surfaces instead.
-
-    /// Primary accent.
-    static let iris = Color(light: Color(hex: 0x5A4FF3), dark: Color(hex: 0x8C82FF))
-    /// Pressed / hover.
-    static let irisPress = Color(light: Color(hex: 0x4A40D6), dark: Color(hex: 0x6E63F0))
-    /// Tinted chip / badge backgrounds.
-    static let irisWash = Color(light: Color(hex: 0xECEAFE), dark: Color(hex: 0x8C82FF, alpha: 0.16))
-    /// Slightly muted iris for secondary marks / inactive-but-branded glyphs.
-    static let irisSoft = Color(light: Color(hex: 0x6A60F0), dark: Color(hex: 0x9E95FF))
-    /// Colour used for the soft accent glow behind genuine "live" states.
-    static let irisGlow = iris
-
-    /// Legible foreground on an iris fill: white in light, near-black in dark
-    /// (dark iris is the lighter #8C82FF). Pair with iris buttons/chips.
-    static let onIris = Color(light: .white, dark: Color(hex: 0x131118))
-
-    // MARK: - Coral (the brand accent)
-    //
-    // Ralli's signature is a warm coral (updated from iris). Primary actions,
-    // active states, likes, streaks, and "live now" warmth. Kept in the red-pink
-    // coral range — never drifting toward the old orange/gold.
+    // Ralli's signature is a warm coral. EVERY accent in the app resolves from
+    // this single token group: primary actions, active tab, capture button,
+    // selected chips, links, likes, streaks, "live now" warmth. There is no other
+    // accent — change `accent` here and the whole app recolors at once. Kept in
+    // the red-pink coral range, never drifting toward orange/gold. On any screen,
+    // one primary accent action leads; for tinted surfaces use `accentWash`, never
+    // a large flat accent fill behind lots of text.
 
     /// Primary brand accent.
-    static let coral = Color(light: Color(hex: 0xFF5A5F), dark: Color(hex: 0xFF7B7F))
+    static let accent = Color(light: Color(hex: 0xFF5A5F), dark: Color(hex: 0xFF7B7F))
     /// Pressed / hover.
-    static let coralPress = Color(light: Color(hex: 0xE64A50), dark: Color(hex: 0xF0656A))
+    static let accentPressed = Color(light: Color(hex: 0xE64A50), dark: Color(hex: 0xF0656A))
     /// Tinted chip / badge / wash backgrounds.
-    static let coralWash = Color(light: Color(hex: 0xFFECEC), dark: Color(hex: 0xFF5A5F, alpha: 0.16))
+    static let accentWash = Color(light: Color(hex: 0xFFECEC), dark: Color(hex: 0xFF5A5F, alpha: 0.16))
+    /// Slightly muted accent for secondary marks / inactive-but-branded glyphs.
+    static let accentSoft = Color(light: Color(hex: 0xFF7E82), dark: Color(hex: 0xFF9599))
     /// Soft accent glow behind genuine "live" states (recording, focus).
-    static let coralGlow = coral
-    /// Legible foreground on a coral fill: white in light, near-black in dark
-    /// (dark coral is the lighter #FF7B7F).
-    static let onCoral = Color(light: .white, dark: Color(hex: 0x131118))
+    static let accentGlow = accent
+    /// Legible foreground on an accent fill: white in light, near-black in dark
+    /// (dark accent is the lighter #FF7B7F). Pair with accent buttons/chips.
+    static let onAccent = Color(light: .white, dark: Color(hex: 0x131118))
+
+    // Compatibility aliases — camera & media code refers to these `coral*` names.
+    // They point at the single accent source above, so nothing diverges.
+    static let coral = accent
+    static let coralPress = accentPressed
+    static let coralWash = accentWash
+    static let coralGlow = accentGlow
+    static let onCoral = onAccent
 
     // MARK: - Functional accents (moments, not decoration)
 
@@ -137,19 +130,15 @@ enum Theme {
 
     // MARK: - Gradients
 
-    /// Subtle iris gradient for primary fills — reads as a soft surface, not a
-    /// hard flat block. Used for pill buttons and selected chips.
-    static let irisGradient = LinearGradient(
-        colors: [iris, irisPress],
+    /// Accent gradient for primary fills — reads as a soft surface, not a hard
+    /// flat block. Used for pill buttons, selected chips, and the capture shutter.
+    static let accentGradient = LinearGradient(
+        colors: [accent, accentPressed],
         startPoint: .topLeading, endPoint: .bottomTrailing
     )
 
-    /// Coral gradient for the primary capture fills (the shutter) — a soft
-    /// surface, not a flat block.
-    static let coralGradient = LinearGradient(
-        colors: [coral, coralPress],
-        startPoint: .topLeading, endPoint: .bottomTrailing
-    )
+    /// Compatibility alias for the capture/shutter fills.
+    static let coralGradient = accentGradient
 
     /// Page background: a barely-there vertical warm gradient so large surfaces
     /// don't feel dead flat. Mostly just `canvas`.
@@ -190,6 +179,21 @@ enum Theme {
 extension Date {
     var clockTime: String {
         formatted(date: .omitted, time: .shortened)
+    }
+
+    /// Hour-only clock time for video logs — always shows `:00`, per the app's
+    /// hourly cadence (a log is filmed once per hour, so the minute is never
+    /// meaningful information).
+    ///
+    /// Every surface that stamps a *video log* with a time uses this, including
+    /// the hour banner burned over the frame itself, so the format can't drift
+    /// between the camera, the review screen and the feeds. Text messages keep
+    /// `clockTime` — a message's minute genuinely does mean something.
+    var hourOnlyClockTime: String {
+        let calendar = Calendar.current
+        let zeroed = calendar.date(bySettingHour: calendar.component(.hour, from: self),
+                                   minute: 0, second: 0, of: self) ?? self
+        return zeroed.formatted(date: .omitted, time: .shortened)
     }
 
     var relativeHour: String {

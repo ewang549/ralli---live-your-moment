@@ -36,7 +36,7 @@ struct NewGroupChatView: View {
                          ? "Pick at least 2 friends"
                          : "\(selected.count) selected")
                         .font(.caption)
-                        .foregroundStyle(selected.count < 2 ? Theme.textSecondary : Theme.iris)
+                        .foregroundStyle(selected.count < 2 ? Theme.textSecondary : Theme.accent)
 
                     ScrollView {
                         LazyVStack(spacing: 8) {
@@ -88,7 +88,7 @@ struct NewGroupChatView: View {
                     Spacer()
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 20))
-                        .foregroundStyle(isSelected ? Theme.iris : Theme.textSecondary.opacity(0.6))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.textSecondary.opacity(0.6))
                 }
                 .padding(11)
             }

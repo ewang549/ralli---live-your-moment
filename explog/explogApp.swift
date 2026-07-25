@@ -3,6 +3,7 @@ import SwiftData
 import UIKit
 import FirebaseCore
 import FirebaseAuth
+import FirebaseMessaging
 import StreamChat
 import StreamChatSwiftUI
 
@@ -63,7 +64,26 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
         connectStreamUser(chatClient)
 
+        // Delegates only — the permission prompt is deliberately deferred to
+        // onboarding, which explains what the notifications are for first.
+        Task { @MainActor in
+            PushNotifications.shared.start()
+            await PushNotifications.shared.registerIfAuthorized()
+        }
+
         return true
+    }
+
+    /// Hands the APNs token to Firebase Messaging, which exchanges it for the
+    /// FCM token the backend actually sends to.
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Messaging.messaging().apnsToken = deviceToken
+    }
+
+    func application(_ application: UIApplication,
+                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        print("APNs registration failed: \(error)")
     }
 
     /// Firebase-signed-in users get a backend-minted token (Stream user is
@@ -92,7 +112,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     private func connectWithDevToken(_ chatClient: ChatClient) {
-        guard StreamConfig.isEnabled, let token = try? Token(rawValue: StreamConfig.userToken) else { return }
+        // `hasDevToken`, not `isEnabled` — `isEnabled` now reports whether a
+        // user is already connected, which is exactly the state this function
+        // exists to get out of.
+        guard StreamConfig.hasDevToken, let token = try? Token(rawValue: StreamConfig.userToken) else { return }
         chatClient.connectUser(
             userInfo: .init(id: StreamConfig.userId, name: StreamConfig.userName),
             token: token

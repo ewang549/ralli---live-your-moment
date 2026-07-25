@@ -184,7 +184,7 @@ struct PulseFeedView: View {
                     Spacer()
                     Image(systemName: "play.circle.fill")
                         .font(.title2)
-                        .foregroundStyle(Theme.iris)
+                        .foregroundStyle(Theme.accent)
                 }
                 .padding(12)
             }
@@ -330,7 +330,7 @@ struct PulseFeedView: View {
         HStack(spacing: 8) {
             Image(systemName: "clock.fill")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Theme.iris)
+                .foregroundStyle(Theme.accent)
             Text(hourState.hourLabel)
                 .font(.system(size: 15, weight: .heavy, design: .rounded).monospacedDigit())
                 .foregroundStyle(Theme.textPrimary)
@@ -342,7 +342,7 @@ struct PulseFeedView: View {
             if !hourState.isAtCurrentHour {
                 Button("now") { withAnimation(.easeInOut(duration: 0.2)) { hourState.resetToNow() } }
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(Theme.iris)
+                    .foregroundStyle(Theme.accent)
                     .buttonStyle(.plain)
             }
         }
@@ -578,7 +578,7 @@ private struct ChatRow: View {
                         Text("🔥")
                         Text("\(chat.streak)")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Theme.iris)
+                            .foregroundStyle(Theme.accent)
                     }
                 }
                 CooldownLabel(chat: chat)

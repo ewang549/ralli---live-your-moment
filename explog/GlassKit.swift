@@ -5,7 +5,7 @@ import SwiftUI
 /// layer grows. Tokens live in `Theme`.
 ///
 /// The look: solid warm `surface` cards separated by tone and spacing, one
-/// confident iris accent used sparingly, generous rounded shapes, soft low
+/// confident coral accent used sparingly, generous rounded shapes, soft low
 /// shadows. Frosted glass is a garnish reserved for the floating nav pill and
 /// overlays on immersive media — everywhere else uses solid surface.
 
@@ -85,11 +85,11 @@ struct GlassBar<Content: View>: View {
 
 // MARK: - Live / online dot
 
-/// A small solid dot for functional "moments": iris for unread, mint for online,
+/// A small solid dot for functional "moments": coral for unread, mint for online,
 /// coral for a live/streak signal. Breathes slowly only for genuine live states.
 struct GlowDot: View {
     var size: CGFloat = 9
-    var color: Color = Theme.iris
+    var color: Color = Theme.accent
     var breathing: Bool = false
 
     @State private var bloom = false
@@ -113,48 +113,73 @@ struct GlowDot: View {
 
 // MARK: - Avatar
 
-/// Circular avatar. No heavy ring by default; a thin iris ring signals
+/// Circular avatar. No heavy ring by default; a thin coral ring signals
 /// "new / unseen" (story-style). Online is a small mint dot, added by the caller.
 struct GlassOrbAvatar: View {
     let emoji: String
     /// Base hue of the fill (matches `Friend.hue`).
     var hue: Double = 0.58
     var size: CGFloat = 44
-    /// Thin iris ring for "new / unseen" / active states.
+    /// Thin coral ring for "new / unseen" / active states.
     var isActive: Bool = false
+    /// A real profile photo on disk, when there is one — takes over from the
+    /// emoji/gradient fill entirely.
+    var photoURL: URL? = nil
+    /// Another account's profile photo, served from Storage. Only consulted
+    /// when there's no local file, so this account's own avatar keeps rendering
+    /// instantly from disk instead of waiting on the network.
+    var remotePhotoURL: URL? = nil
 
     var body: some View {
-        Text(emoji)
-            .font(.system(size: size * 0.5))
-            .frame(width: size, height: size)
-            .background {
-                Circle().fill(Theme.avatarGradient(hue: hue))
-            }
-            .overlay {
-                // Barely-there inner edge so the disc sits cleanly on any surface.
-                Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
-            }
-            .overlay {
-                if isActive {
-                    Circle()
-                        .strokeBorder(Theme.iris, lineWidth: max(1.5, size * 0.05))
-                        .padding(-size * 0.08)
+        ZStack {
+            if let photoURL, let uiImage = UIImage(contentsOfFile: photoURL.path) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+            } else if let remotePhotoURL {
+                AsyncImage(url: remotePhotoURL) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    // The emoji orb stays put while the photo loads, so the
+                    // avatar never flashes empty.
+                    ZStack {
+                        Circle().fill(Theme.avatarGradient(hue: hue))
+                        Text(emoji).font(.system(size: size * 0.5))
+                    }
                 }
+            } else {
+                Circle().fill(Theme.avatarGradient(hue: hue))
+                Text(emoji).font(.system(size: size * 0.5))
             }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay {
+            // Barely-there inner edge so the disc sits cleanly on any surface.
+            Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
+        }
+        .overlay {
+            if isActive {
+                Circle()
+                    .strokeBorder(Theme.accent, lineWidth: max(1.5, size * 0.05))
+                    .padding(-size * 0.08)
+            }
+        }
     }
 }
 
 /// Convenience overload so existing `Friend` rows can adopt the avatar look.
 extension GlassOrbAvatar {
     init(friend: Friend, size: CGFloat = 44, isActive: Bool = false) {
-        self.init(emoji: friend.emoji, hue: friend.hue, size: size, isActive: isActive)
+        self.init(emoji: friend.emoji, hue: friend.hue, size: size, isActive: isActive,
+                  photoURL: friend.avatarPhotoURL)
     }
 }
 
 // MARK: - Media action rail
 
 /// One button in a full-bleed feed's right-hand rail: a glass disc over media
-/// with a white glyph that lights up in its accent when active (iris by default,
+/// with a white glyph that lights up in its accent when active (coral by default,
 /// coral for likes). An optional count rides underneath.
 struct RailButton: View {
     let icon: String
@@ -162,8 +187,8 @@ struct RailButton: View {
     var activeIcon: String?
     var count: Int?
     var isActive: Bool = false
-    /// Accent for the active state — coral for likes, iris otherwise.
-    var activeTint: Color = Theme.iris
+    /// Accent for the active state — coral for likes, coral otherwise.
+    var activeTint: Color = Theme.accent
     var size: CGFloat = 46
     let action: () -> Void
 
@@ -233,8 +258,8 @@ struct SequenceScrubber: View {
 
 // MARK: - Chips
 
-/// Small commitment pill — "Follow", "Add". Prominent iris-wash call to action
-/// when open; solid iris once the commitment is made, so state reads at a glance.
+/// Small commitment pill — "Follow", "Add". Prominent coral-wash call to action
+/// when open; solid coral once the commitment is made, so state reads at a glance.
 struct AccentChip: View {
     let title: String
     var systemImage: String?
@@ -250,12 +275,12 @@ struct AccentChip: View {
                 }
                 Text(title).font(.system(size: 13, weight: .semibold))
             }
-            .foregroundStyle(isFilled ? Theme.onIris : Theme.iris)
+            .foregroundStyle(isFilled ? Theme.onAccent : Theme.accent)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background {
-                Capsule().fill(isFilled ? AnyShapeStyle(Theme.iris)
-                                        : AnyShapeStyle(Theme.irisWash))
+                Capsule().fill(isFilled ? AnyShapeStyle(Theme.accent)
+                                        : AnyShapeStyle(Theme.accentWash))
             }
         }
         .buttonStyle(.plain)
@@ -263,8 +288,8 @@ struct AccentChip: View {
     }
 }
 
-/// Segmented filter chip for list headers. Selected = iris-wash fill with
-/// iris-press text; unselected = sunken with secondary text. The trailing count
+/// Segmented filter chip for list headers. Selected = coral-wash fill with
+/// coral-press text; unselected = sunken with secondary text. The trailing count
 /// rides in a small pill so unread volume reads without a badge.
 struct FilterChip: View {
     let title: String
@@ -277,15 +302,15 @@ struct FilterChip: View {
             HStack(spacing: 6) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isActive ? Theme.irisPress : Theme.textSecondary)
+                    .foregroundStyle(isActive ? Theme.accentPressed : Theme.textSecondary)
                 if count > 0 {
                     Text("\(count)")
                         .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(isActive ? Theme.onIris : Theme.textSecondary)
+                        .foregroundStyle(isActive ? Theme.onAccent : Theme.textSecondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)
                         .background {
-                            Capsule().fill(isActive ? AnyShapeStyle(Theme.iris)
+                            Capsule().fill(isActive ? AnyShapeStyle(Theme.accent)
                                                     : AnyShapeStyle(Theme.textSecondary.opacity(0.16)))
                         }
                 }
@@ -293,7 +318,7 @@ struct FilterChip: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background {
-                Capsule().fill(isActive ? AnyShapeStyle(Theme.irisWash)
+                Capsule().fill(isActive ? AnyShapeStyle(Theme.accentWash)
                                         : AnyShapeStyle(Theme.sunken))
             }
         }
@@ -337,53 +362,77 @@ struct CloseButton: View {
 // MARK: - Circle button
 
 /// Header affordance: a soft disc with a glyph. `isProminent` promotes it to the
-/// screen's one primary action (add friend, create) with a solid iris fill.
+/// screen's one primary action (add friend, create) with a solid coral fill.
 struct GlassCircleButton: View {
     let icon: String
     var label: String
     var size: CGFloat = 38
-    /// Solid iris fill — the screen's single primary action.
+    /// Solid coral fill — the screen's single primary action.
     var isProminent: Bool = false
-    /// Small iris dot at the top-right — unseen notifications.
+    /// Small coral dot at the top-right — unseen notifications.
     var hasBadge: Bool = false
+    /// How many items are waiting. Anything above zero renders a counted badge
+    /// rather than the bare dot: push permission can never be guaranteed, so
+    /// opening the app has to be enough on its own to notice a pending friend
+    /// request — and a 9pt dot is easy to scroll straight past.
+    var badgeCount: Int = 0
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: size * 0.4, weight: .semibold))
-                .foregroundStyle(isProminent ? Theme.onIris : Theme.textPrimary)
+                .foregroundStyle(isProminent ? Theme.onAccent : Theme.textPrimary)
                 .frame(width: size, height: size)
                 .background {
                     Circle()
-                        .fill(isProminent ? AnyShapeStyle(Theme.iris)
+                        .fill(isProminent ? AnyShapeStyle(Theme.accent)
                                           : AnyShapeStyle(Theme.surface))
-                        .shadow(color: isProminent ? Theme.iris.opacity(0.35)
+                        .shadow(color: isProminent ? Theme.accent.opacity(0.35)
                                                    : Color(hex: 0x14121E, alpha: 0.1),
                                 radius: isProminent ? 12 : 7, y: 3)
                 }
                 .overlay(alignment: .topTrailing) {
-                    if hasBadge {
+                    if badgeCount > 0 {
+                        Text(badgeCount > 9 ? "9+" : "\(badgeCount)")
+                            .font(.system(size: 11, weight: .heavy, design: .rounded))
+                            .foregroundStyle(Theme.onAccent)
+                            .padding(.horizontal, badgeCount > 9 ? 4 : 0)
+                            .frame(minWidth: 18, minHeight: 18)
+                            .background { Capsule().fill(Theme.accent) }
+                            // Punches the badge out of the button beneath it so
+                            // it reads as a separate, urgent object.
+                            .overlay { Capsule().strokeBorder(Theme.base, lineWidth: 2) }
+                            .shadow(color: Theme.accent.opacity(0.45), radius: 6, y: 1)
+                            .offset(x: 7, y: -5)
+                    } else if hasBadge {
                         GlowDot(size: 9).offset(x: 1, y: -1)
                     }
                 }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(label)
+        .accessibilityLabel(badgeCount > 0 ? "\(label), \(badgeCount) waiting" : label)
     }
 }
 
 // MARK: - Wordmark
 
-/// "ralli" — lowercase, tight tracking, medium-bold, in iris. The brand mark.
+/// "ralli" — lowercase, tight tracking, medium-bold, in coral. The brand mark.
+///
+/// `canonical` is the one true size for the top-level tab headers (Pulse,
+/// Places, …). They must all render `RalliWordmark()` with no override so the
+/// wordmark is pixel-identical tab to tab and never appears to jump or resize
+/// when switching. Only hero/onboarding moments (auth, profile setup) pass a
+/// deliberately larger `size`.
 struct RalliWordmark: View {
-    var size: CGFloat = 34
+    static let canonical: CGFloat = 30
+    var size: CGFloat = canonical
 
     var body: some View {
         Text("ralli")
             .font(.system(size: size, weight: .semibold, design: .rounded))
             .tracking(-size * 0.02)
-            .foregroundStyle(Theme.iris)
+            .foregroundStyle(Theme.accent)
     }
 }
 
@@ -438,7 +487,7 @@ struct GlassBackground: View {
 
 // MARK: - Field & primary button
 
-/// Text field on a sunken well — no border, an iris focus ring, ink-3 placeholder.
+/// Text field on a sunken well — no border, an coral focus ring, ink-3 placeholder.
 struct GlassField: View {
     let placeholder: String
     @Binding var text: String
@@ -451,7 +500,7 @@ struct GlassField: View {
             if let systemImage {
                 Image(systemName: systemImage)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(focused ? Theme.iris : Theme.textSecondary)
+                    .foregroundStyle(focused ? Theme.accent : Theme.textSecondary)
             }
             TextField("", text: $text, prompt: Text(placeholder).foregroundColor(Theme.textTertiary))
                 .foregroundStyle(Theme.textPrimary)
@@ -464,14 +513,14 @@ struct GlassField: View {
                 .fill(Theme.sunken)
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Theme.iris, lineWidth: focused ? 2 : 0)
+                        .strokeBorder(Theme.accent, lineWidth: focused ? 2 : 0)
                 }
         }
         .animation(.easeOut(duration: 0.15), value: focused)
     }
 }
 
-/// Primary action: a pill in solid iris with legible text. Pressed → iris-press
+/// Primary action: a pill in solid coral with legible text. Pressed → coral-press
 /// with a slight scale.
 struct PrimaryButton: View {
     let title: String
@@ -483,19 +532,19 @@ struct PrimaryButton: View {
         Button(action: action) {
             Group {
                 if busy {
-                    ProgressView().tint(Theme.onIris)
+                    ProgressView().tint(Theme.onAccent)
                 } else {
                     Text(title).font(.system(size: 16, weight: .semibold))
                 }
             }
-            .foregroundStyle(Theme.onIris)
+            .foregroundStyle(Theme.onAccent)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
             .background {
                 Capsule()
-                    .fill(enabled ? AnyShapeStyle(Theme.iris)
+                    .fill(enabled ? AnyShapeStyle(Theme.accent)
                                   : AnyShapeStyle(Theme.textSecondary.opacity(0.25)))
-                    .shadow(color: enabled ? Theme.iris.opacity(0.3) : .clear, radius: 12, y: 4)
+                    .shadow(color: enabled ? Theme.accent.opacity(0.3) : .clear, radius: 12, y: 4)
             }
         }
         .buttonStyle(PressScaleStyle())

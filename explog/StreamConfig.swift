@@ -1,4 +1,6 @@
 import Foundation
+import StreamChat
+import StreamChatSwiftUI
 
 /// Stream Chat credentials. The API key is safe to ship; the API SECRET must
 /// never appear anywhere in this app — tokens are minted server-side / via the
@@ -29,5 +31,28 @@ enum StreamConfig {
     /// gitignored xcconfig — never here.
     static let userToken = ""
 
-    static var isEnabled: Bool { !userToken.isEmpty }
+    /// Whether the signed-out dev fallback has a token to connect with.
+    ///
+    /// Only `connectWithDevToken` should ask this. It used to *be* `isEnabled`,
+    /// which is the bug below.
+    static var hasDevToken: Bool { !userToken.isEmpty }
+
+    /// Whether chat surfaces should render real Stream threads.
+    ///
+    /// This asks the one question that matters — is there a connected Stream
+    /// user right now — rather than reading a constant. It was `!userToken.isEmpty`,
+    /// and since `userToken` is a `let` hardcoded to "" that nothing assigns,
+    /// it was false in every build for every account. Every chat surface took
+    /// its `else` branch and rendered the local-only `MessageThreadView`, so
+    /// messages were written to SwiftData and never sent: they appeared in your
+    /// own thread and reached nobody. The per-user flow that replaced the
+    /// committed dev token (`StreamTokenProvider.fetchToken` →
+    /// `AuthGateView.connectStream(as:)`) was built afterward and this gate was
+    /// never updated to notice.
+    ///
+    /// True exactly when a connect has succeeded for this session — signed out
+    /// or not yet connected still correctly falls back to the local thread.
+    static var isEnabled: Bool {
+        InjectedValues[\.chatClient].currentUserId != nil
+    }
 }

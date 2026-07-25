@@ -38,7 +38,7 @@ struct MessageThreadView: View {
                 }
             }
 
-            // Real-time input bar with send — sunken field, iris send.
+            // Real-time input bar with send — sunken field, coral send.
             HStack(spacing: 10) {
                 TextField("Message…", text: $draft)
                     .textFieldStyle(.plain)
@@ -70,7 +70,7 @@ struct MessageThreadView: View {
     }
 }
 
-/// The one iris control in a thread: a solid disc that dims to sunken when
+/// The one coral control in a thread: a solid disc that dims to sunken when
 /// there's nothing to send. Shared by every composer in the app.
 struct SendButton: View {
     let enabled: Bool
@@ -80,12 +80,12 @@ struct SendButton: View {
         Button(action: action) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(enabled ? Theme.onIris : Theme.textSecondary)
+                .foregroundStyle(enabled ? Theme.onAccent : Theme.textSecondary)
                 .frame(width: 38, height: 38)
                 .background {
                     Circle()
-                        .fill(enabled ? AnyShapeStyle(Theme.iris) : AnyShapeStyle(Theme.sunken))
-                        .shadow(color: enabled ? Theme.iris.opacity(0.35) : .clear, radius: 10, y: 2)
+                        .fill(enabled ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(Theme.sunken))
+                        .shadow(color: enabled ? Theme.accent.opacity(0.35) : .clear, radius: 10, y: 2)
                 }
         }
         .buttonStyle(.plain)
@@ -100,13 +100,25 @@ struct SendButton: View {
 struct ChatDrawerView: View {
     let chat: Chat
 
+    @Environment(\.modelContext) private var modelContext
+
     var body: some View {
         VStack(spacing: 0) {
-            Text(chat.displayName)
-                .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
-                .padding(.top, 18)
-                .padding(.bottom, 10)
+            Group {
+                if StreamConfig.isEnabled {
+                    // Presence and typing come off the live channel; the plain
+                    // title is all a local-only thread can offer.
+                    ChatPresenceHeader(channelId: chat.streamChannelId,
+                                       name: chat.displayName)
+                } else {
+                    Text(chat.displayName)
+                        .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
+                }
+            }
+            .padding(.top, 18)
+            .padding(.bottom, 10)
+
             if StreamConfig.isEnabled {
                 // Real messaging over Stream Chat.
                 StreamThreadView(channelId: chat.streamChannelId,
@@ -119,6 +131,11 @@ struct ChatDrawerView: View {
         .background(GlassBackground())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        // Opening the drawer is reading the thread — clear its unread dot.
+        .onAppear {
+            chat.markRead()
+            try? modelContext.save()
+        }
     }
 }
 
@@ -130,6 +147,8 @@ struct ChatDetailView: View {
     /// gets an ✕. When pushed onto a nav stack this stays nil and the system
     /// back button handles dismissal — no double affordance.
     var onClose: (() -> Void)?
+
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         Group {
@@ -143,9 +162,20 @@ struct ChatDetailView: View {
             }
         }
             .background(GlassBackground())
-            .navigationTitle(chat.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // A principal item rather than `navigationTitle`, so the online
+                // dot and "typing…" can live under the name.
+                ToolbarItem(placement: .principal) {
+                    if StreamConfig.isEnabled {
+                        ChatPresenceHeader(channelId: chat.streamChannelId,
+                                           name: chat.displayName)
+                    } else {
+                        Text(chat.displayName)
+                            .font(.headline)
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                }
                 if let onClose {
                     ToolbarItem(placement: .topBarLeading) {
                         CloseButton(size: 32, action: onClose)
@@ -160,6 +190,12 @@ struct ChatDetailView: View {
                     }
                 }
             }
+            // Opening the thread is reading it — clear its unread dot, and
+            // stay caught up so returning to Pulse doesn't show it again.
+            .onAppear {
+                chat.markRead()
+                try? modelContext.save()
+            }
     }
 }
 
@@ -169,6 +205,8 @@ struct MessageBubble: View {
     let message: Message
 
     @State private var showSpotDetail = false
+    @State private var showProfile = false
+    @State private var safety = SafetyPresentation()
 
     private var isMine: Bool { message.author?.isMe ?? false }
     private let tapbacks = ["❤️", "👍", "😂", "‼️", "❓"]
@@ -178,9 +216,12 @@ struct MessageBubble: View {
             if isMine { Spacer(minLength: 60) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 3) {
                 if !isMine, let author = message.author {
-                    Text(author.name)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Theme.textSecondary)
+                    Button { showProfile = true } label: {
+                        Text(author.name)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
                 }
                 if let spotName = message.sharedSpotName {
                     // A shared-location card. When the real spot rode along with
@@ -198,14 +239,14 @@ struct MessageBubble: View {
                         .font(.subheadline)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        // Mine in iris, theirs on a sunken surface — the thread
+                        // Mine in coral, theirs on a sunken surface — the thread
                         // reads as two voices without a second accent colour.
                         .background {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(isMine ? AnyShapeStyle(Theme.iris)
+                                .fill(isMine ? AnyShapeStyle(Theme.accent)
                                              : AnyShapeStyle(Theme.sunken))
                         }
-                        .foregroundStyle(isMine ? Theme.onIris : Theme.textPrimary)
+                        .foregroundStyle(isMine ? Theme.onAccent : Theme.textPrimary)
                         // iMessage-style tapback badge, on a surface chip so it
                         // never competes with the bubble beneath it.
                         .overlay(alignment: isMine ? .topLeading : .topTrailing) {
@@ -232,6 +273,19 @@ struct MessageBubble: View {
                             } label: {
                                 Label("Copy", systemImage: "doc.on.doc")
                             }
+                            // Same long-press that carries tapbacks also
+                            // carries the way out, for messages from a real
+                            // account that isn't yours.
+                            if let author = message.author,
+                               !author.isMe, !author.remoteUID.isEmpty {
+                                Divider()
+                                SafetyMenuItems(
+                                    target: .message(id: message.id.uuidString,
+                                                     authorUid: author.remoteUID,
+                                                     authorName: author.name),
+                                    presentation: safety
+                                )
+                            }
                         }
                 }
                 Text(message.sentAt.clockTime)
@@ -247,6 +301,12 @@ struct MessageBubble: View {
                 SpotDetailView(spot: spot)
             }
         }
+        .fullScreenCover(isPresented: $showProfile) {
+            if let author = message.author {
+                PublicProfileSheet(friend: author)
+            }
+        }
+        .modifier(SafetySheets(presentation: safety))
     }
 
     /// A reaction broadcast bubble: a small looping preview of the friend's log
@@ -295,7 +355,7 @@ struct MessageBubble: View {
     private func locationCard(name: String) -> some View {
         let card = HStack(spacing: 6) {
             Image(systemName: "mappin.circle.fill")
-                .foregroundStyle(Theme.iris)
+                .foregroundStyle(Theme.accent)
             Text(name)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)

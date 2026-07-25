@@ -161,7 +161,7 @@ private struct DayRecapPage: View {
                 HStack(spacing: 4) {
                     ForEach(clips.indices, id: \.self) { index in
                         Capsule()
-                            .fill(index <= fallbackIndex ? Theme.iris : .white.opacity(0.3))
+                            .fill(index <= fallbackIndex ? Theme.accent : .white.opacity(0.3))
                             .frame(height: 3)
                     }
                 }
@@ -192,7 +192,7 @@ private struct DayRecapPage: View {
             Spacer()
             HStack(spacing: 10) {
                 Image(systemName: "film.stack")
-                    .foregroundStyle(Theme.iris)
+                    .foregroundStyle(Theme.accent)
                 Text("\(clips.count) clip\(clips.count == 1 ? "" : "s") · \(totalSecondsLabel)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)

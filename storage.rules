@@ -1,0 +1,52 @@
+rules_version = '2';
+
+// Ralli Storage rules.
+//
+// Same principle as Firestore: default deny, and anything that needs
+// validation goes through a Cloud Function. The one thing clients do directly
+// is upload their own log media, because a video has no business being
+// round-tripped through a callable.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // logs/{uid}/{file} — a user's captured photos and videos.
+    //
+    // Writes are restricted to the author's own prefix, which is also what
+    // publishLog re-checks before it will record a log pointing at a path.
+    // Reads are open to signed-in users rather than to friends specifically:
+    // Storage rules can't see the Firestore friend graph, so the real gate is
+    // listFriendLogs, which only ever hands a URL to an actual friend. The
+    // download URL carries an unguessable token on top of that.
+    match /logs/{uid}/{file} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && request.auth.uid == uid
+                   && request.resource.size < 60 * 1024 * 1024
+                   && request.resource.contentType.matches('(image|video)/.*');
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // avatars/{uid}/{file} — a user's profile photo.
+    //
+    // Same shape as logs, with a much tighter size cap: an avatar is one
+    // compressed JPEG. Readable by any signed-in user because a profile photo
+    // is exactly as public as the profile it belongs to.
+    match /avatars/{uid}/{file} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && request.auth.uid == uid
+                   && request.resource.size < 8 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Anything not matched above.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

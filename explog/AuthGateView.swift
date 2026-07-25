@@ -20,9 +20,31 @@ struct AuthGateView: View {
     /// data reach a real account.
     @State private var stage: Stage = .checkingProfile
     @State private var session = AuthSession()
+    /// Last uid we saw, so a sign-out knows whose push token to remove.
+    @State private var signedInUID: String?
+    /// Read once at init, not on every render: the flag flips as the screen
+    /// dismisses, and re-reading would tear it down mid-animation.
+    @State private var showProWelcome = ProWelcome.shouldShowAtLaunch
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
+        ZStack {
+            gate
+            // Sits over the gate rather than in front of it in the switch, so
+            // auth still resolves underneath while this is up — dismissing lands
+            // on a sign-in screen that's already settled.
+            if showProWelcome {
+                ProWelcomeView {
+                    ProWelcome.hasSeen = true
+                    withAnimation(.easeOut(duration: 0.3)) { showProWelcome = false }
+                }
+                .transition(.opacity)
+                .zIndex(1)
+            }
+        }
+    }
+
+    private var gate: some View {
         Group {
             switch stage {
             case .signedOut:
@@ -47,15 +69,48 @@ struct AuthGateView: View {
             }
 #endif
             session.onChange = { uid in
-                // Scope the cache to the account before any view reads it, so a
-                // sign-in/sign-out/account-switch can't inherit stale rows.
-                LocalStore.claim(by: uid, context: modelContext)
+                // Move the push token with the account. Captured before the
+                // branch below because a sign-out has to delete the token from
+                // the account we're *leaving* — by the time this fires,
+                // `Auth.currentUser` is already nil.
+                let previous = signedInUID
+                signedInUID = uid
+                if previous != uid, let previous {
+                    Task { await PushNotifications.shared.clearToken(for: previous) }
+                }
 
-                if uid == nil {
-                    withAnimation { stage = .signedOut }
-                } else {
-                    stage = .checkingProfile
+                // Swap the UI OFF the previous account's data views *before*
+                // wiping their models. If we wipe first, a still-mounted view
+                // that holds a live reference to a now-deleted object — e.g.
+                // Profile's `@Bindable me` and its `$interests` binding — faults
+                // on access and crashes ("backing data detached from context").
+                guard let uid else {
+                    // Sign-out: flip to Welcome and touch nothing else.
+                    //
+                    // Wiping here is what used to make logout crash. Deferring
+                    // the wipe by a runloop only *usually* outran SwiftUI's
+                    // teardown, so the crash came back whenever anything else
+                    // was busy on the main actor. The cache is instead cleared
+                    // by the next `claim` (below), which runs while the gate is
+                    // showing its loading screen and no data-bound view exists
+                    // — an ordering that holds by construction rather than by
+                    // timing. Nothing renders cached rows while signed out, so
+                    // leaving them on disk until then is not observable.
+                    stage = .signedOut
+                    return
+                }
+
+                stage = .checkingProfile
+
+                // Data views are torn down (or never mounted, on a cold start):
+                // scope the cache to the account, then resolve the profile.
+                // Still deferred a runloop so the loading screen is up first.
+                DispatchQueue.main.async {
+                    LocalStore.claim(by: uid, context: modelContext)
                     Task { await resolveProfile() }
+                    // A token minted while signed out has nowhere to live, so
+                    // re-file it under the account that just signed in.
+                    Task { await PushNotifications.shared.syncTokenForCurrentUser() }
                 }
             }
             session.start()
@@ -67,7 +122,7 @@ struct AuthGateView: View {
             GlassBackground()
             VStack(spacing: 18) {
                 RalliWordmark(size: 40)
-                ProgressView().tint(Theme.iris)
+                ProgressView().tint(Theme.accent)
             }
         }
     }
@@ -173,12 +228,12 @@ struct WelcomeView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Onboarding has no content of its own, so a soft iris bloom behind the
+        // Onboarding has no content of its own, so a soft coral bloom behind the
         // warm canvas gives the hero some warmth without competing with the copy.
         .background {
             ZStack {
                 Theme.appBackground
-                RadialGradient(colors: [Theme.iris.opacity(0.10), .clear],
+                RadialGradient(colors: [Theme.accent.opacity(0.10), .clear],
                                center: .init(x: 0.5, y: 0.22),
                                startRadius: 0, endRadius: 380)
             }

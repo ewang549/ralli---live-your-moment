@@ -7,13 +7,22 @@ import UIKit
 /// this is where captions and stickers get added before posting.
 ///
 /// The captured media stays the source of truth; overlays are a creative layer
-/// on top. On Next we hand `SendLogView` the original media plus a caption seeded
-/// from any text you added (full burn-in of stickers/drawing into an exported
-/// video is a larger, separate job — for photos, Save composites what you see).
+/// on top. On Next we hand the chosen share screen the original media plus a
+/// caption seeded from any text you added (full burn-in of stickers/drawing
+/// into an exported video is a larger, separate job — for photos, Save
+/// composites what you see).
+///
+/// Where Next goes is decided *here*, by the place toggle, rather than by a
+/// segmented control on the screen after it: off sends you straight to the
+/// friends picker, on sends you to the place composer.
 struct PostCaptureReview: View {
     let media: CapturedMedia
     /// The look picked in the viewfinder, carried through so the grade persists.
     var look: CameraLook = .normal
+    /// Passed through to the share screens — see the note on
+    /// `CameraCaptureView.router` for why this is an explicit parameter rather
+    /// than `@Environment`.
+    let logSync: LogSync
     /// Back to the live viewfinder (discard this take).
     let onRetake: () -> Void
     /// The log was sent — tear the whole capture flow down.
@@ -35,6 +44,8 @@ struct PostCaptureReview: View {
 
     // Flow.
     @State private var showSend = false
+    /// Whether Next opens the place composer instead of the friends picker.
+    @State private var postToPlace = false
     @State private var savedToast = false
     @State private var showStickerTray = false
 
@@ -54,10 +65,22 @@ struct PostCaptureReview: View {
             ZStack {
                 Theme.base.ignoresSafeArea()
 
-                // The shot, full-bleed, graded with the chosen look.
-                ClipView(clip: previewClip)
+                // The shot at its true aspect, graded with the chosen look.
+                //
+                // `.fit` rather than the feed's full-bleed `.fill`: capture is
+                // landscape-only, so filling a portrait screen cropped the shot
+                // into a vertical frame the user never composed. The chrome
+                // stays portrait; only the media letterboxes, over black.
+                ClipView(clip: previewClip, contentMode: .fit)
                     .applyLook(look)
+                    .background(Color.black.ignoresSafeArea())
                     .ignoresSafeArea()
+
+                // The hour banner, in exactly the type the viewfinder showed it
+                // in — same component, so the stamp can't drift between the two
+                // screens. Live, because the log is stamped when it's sent, not
+                // when it was shot.
+                LiveHourOverlay()
 
                 // Drawing surface + committed overlays.
                 strokeCanvas
@@ -78,7 +101,13 @@ struct PostCaptureReview: View {
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showSend) {
-            SendLogView(media: media, initialLabel: caption, onSent: onSent)
+            if postToPlace {
+                PublicPlacePostView(media: media, initialName: caption,
+                                    logSync: logSync, onSent: onSent)
+            } else {
+                SendToFriendsView(media: media, initialLabel: caption,
+                                  logSync: logSync, onSent: onSent)
+            }
         }
         .onAppear { seedOverlayDefaults() }
     }
@@ -200,11 +229,15 @@ struct PostCaptureReview: View {
 
             Spacer()
 
-            // Bottom: creative rail (left) + coral Next (right).
+            // Bottom: creative rail (left) + destination toggle over the
+            // coral Next (right).
             HStack(alignment: .bottom) {
                 creativeRail
                 Spacer()
-                nextButton
+                VStack(alignment: .trailing, spacing: 10) {
+                    placeToggle
+                    nextButton
+                }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 14)
@@ -225,6 +258,39 @@ struct PostCaptureReview: View {
         }
     }
 
+    /// Chooses what Next opens: off → the friends picker, on → the place
+    /// composer (name, location, audience).
+    ///
+    /// A glass capsule that fills coral when armed — the same on/off language
+    /// the creative rail uses for Draw, rather than a borrowed icon set.
+    private var placeToggle: some View {
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                postToPlace.toggle()
+            }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: postToPlace ? "mappin.circle.fill" : "mappin.and.ellipse")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Post to a place")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(postToPlace ? Theme.onCoral : .white)
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .background {
+                Capsule().fill(.ultraThinMaterial)
+                if postToPlace { Capsule().fill(Theme.coral) }
+            }
+            .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.75))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Post to a place")
+        .accessibilityValue(postToPlace ? "On" : "Off")
+        .accessibilityHint("Next asks for a name, a location, and who can see it")
+    }
+
     private var nextButton: some View {
         Button {
             selectedID = nil
@@ -243,7 +309,7 @@ struct PostCaptureReview: View {
             .shadow(color: Theme.coralGlow.opacity(0.5), radius: 14, y: 4)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Next: choose who to send to")
+        .accessibilityLabel(postToPlace ? "Next: name this place post" : "Next: choose who to send to")
     }
 
     // MARK: - Brush bar (draw mode)
@@ -430,7 +496,10 @@ struct PostCaptureReview: View {
     private func saveComposite() {
         let renderer = ImageRenderer(content:
             ZStack {
-                ClipView(clip: previewClip).applyLook(look)
+                // Same `.fit` over black as the review screen, so the saved
+                // image matches what the overlays were positioned against.
+                Color.black
+                ClipView(clip: previewClip, contentMode: .fit).applyLook(look)
                 staticStrokeCanvas
                 staticOverlays
             }

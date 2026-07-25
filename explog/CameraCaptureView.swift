@@ -4,6 +4,9 @@ import AVFoundation
 import Combine
 import PhotosUI
 import UIKit
+import os
+
+private let cameraLog = Logger(subsystem: "com.ej.explog", category: "camera")
 
 /// Maximum length of a recorded video clip. The duration pill toggles between the
 /// two values; the initial value is seeded from the launching context (2s for a
@@ -173,6 +176,9 @@ struct CameraCaptureView: View {
     /// not reliably inherit an @Observable injected on the presenting view, and
     /// a missing lookup is a hard crash.
     let router: AppRouter
+    /// Same reasoning as `router` above — carried through to `PostCaptureReview`
+    /// and the share screens, all presented via further nested sheets/covers.
+    let logSync: LogSync
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -206,8 +212,9 @@ struct CameraCaptureView: View {
     @State private var showLookName = false
     /// Whether the look carousel is expanded over the shutter row.
     @State private var showLooks = false
-    /// Which gesture the shutter performs.
-    @State private var captureMode: CaptureMode = .photo
+    /// Which gesture the shutter performs. Video is the default: a Ralli log is
+    /// a short horizontal *video*, and photo is the exception you opt into.
+    @State private var captureMode: CaptureMode = .video
     /// Hands-free countdown length.
     @State private var selfTimer: SelfTimer = .off
     /// Live countdown value while a self-timer runs; nil when idle.
@@ -222,26 +229,126 @@ struct CameraCaptureView: View {
 
     private var maxDuration: TimeInterval { maxVideoDuration.seconds }
 
+    // MARK: Letterbox bands
+    //
+    // The screen is a real layout split, not one overlapping stack: the
+    // viewfinder is an aspect-locked 16:9 card, and every control lives in a
+    // band *outside* it. The bands below reserve that space up front, so the
+    // card is sized around the chrome rather than the chrome being floated on
+    // top of a nearly-full-bleed card.
+
+    /// Band above the card, holding the close button and the utility row.
+    /// Tall enough for a 44pt tap target plus a little air.
+    private let topBandHeight: CGFloat = 52
+    /// Band below the card, holding the capture-mode strip.
+    private let bottomBandHeight: CGFloat = 52
+    /// Trailing column holding the shutter cluster: the 74pt shutter, the 44pt
+    /// flip/flash/gallery stack, and the gap between them.
+    private let shutterColumnWidth: CGFloat = 128
+
+    /// Orientation state machine, state 0: the interface has actually finished
+    /// rotating to landscape. `.task` below *requests* the rotation, but the
+    /// system's own animation takes a beat — revealing landscape-laid-out
+    /// controls before that beat completes is what caused the flicker (icons
+    /// appearing over a still-portrait frame). Driven off real layout geometry
+    /// (below) rather than a fixed delay, since that's the one signal that
+    /// actually tracks when the rotation animation is done.
+    @State private var isLandscapeReady = false
+
+    /// The window's real safe-area insets.
+    ///
+    /// Read from UIKit rather than SwiftUI because the control layer lives
+    /// inside a container that deliberately ignores the safe area (the
+    /// viewfinder is meant to run under the bezel) — and `ignoresSafeArea`
+    /// zeroes the inset environment for everything inside it. Without the real
+    /// numbers the top-trailing pill and the shutter sit under the Dynamic
+    /// Island, and the bottom strip under the home indicator, since in
+    /// landscape the whole safe area lands on one short edge.
+    @State private var safeArea = EdgeInsets()
+
+    /// Current window insets, or zero before there's a window to ask.
+    private static func windowSafeArea() -> EdgeInsets {
+        let insets = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }?
+            .safeAreaInsets ?? .zero
+        return EdgeInsets(top: insets.top, leading: insets.left,
+                          bottom: insets.bottom, trailing: insets.right)
+    }
+
     var body: some View {
-        ZStack {
-            // Warm dark base behind everything (never pure black).
-            Theme.base.ignoresSafeArea()
+        GeometryReader { screen in
+            ZStack {
+                // Warm dark base behind everything (never pure black) —
+                // doubles as the letterbox around the bounded viewfinder card.
+                Theme.base.ignoresSafeArea()
 
-            viewfinderLayer
-                .ignoresSafeArea()
+                // The camera is landscape-only (Ralli video is horizontal), so
+                // this is laid out for landscape and never reflows to portrait.
+                //
+                // One symmetric side inset rather than per-edge safe areas: in
+                // landscape the whole safe area lands on one short edge, and
+                // padding the two sides differently is what used to drag the
+                // mode strip visibly off the screen's centre. Taking the larger
+                // of the two on both sides costs a little width on the flat
+                // edge and keeps every band centred on the *screen*.
+                let sideInset = max(safeArea.leading, safeArea.trailing) + 12
 
-            // Legibility scrims + rule-of-thirds grid ride full-bleed over the
-            // viewfinder, beneath the controls.
-            edgeScrims.ignoresSafeArea().allowsHitTesting(false)
-            if showGrid { RuleOfThirdsGrid().ignoresSafeArea().allowsHitTesting(false) }
-            focusReticleLayer.ignoresSafeArea().allowsHitTesting(false)
+                VStack(spacing: 0) {
+                    topBand
+                    HStack(spacing: 10) {
+                        viewfinderCard
+                        shutterColumn
+                    }
+                    .frame(maxHeight: .infinity)
+                    bottomBand
+                }
+                .padding(.horizontal, sideInset)
+                .padding(.top, safeArea.top + 8)
+                .padding(.bottom, safeArea.bottom + 10)
 
-            // The camera is landscape-only (Ralli video is horizontal), so the
-            // controls are laid out for landscape and never reflow to portrait.
-            landscapeControls
+                // Transient readouts (record timer, zoom ×, look name) ride the
+                // empty centre of the top band, between close and the utilities.
+                topReadouts.padding(.top, safeArea.top + 8)
 
-            // Big self-timer countdown, above everything.
-            countdownOverlay.allowsHitTesting(false)
+                // The creative strip rises over the letterbox space just above
+                // the mode strip when opened — a transient tray, so unlike the
+                // permanent chrome it may overlap the card's margin. Held clear
+                // of the trailing shutter cluster.
+                if showLooks {
+                    VStack {
+                        Spacer()
+                        looksCarousel
+                            .padding(.trailing, sideInset + shutterColumnWidth)
+                    }
+                    .padding(.bottom, safeArea.bottom + 10 + bottomBandHeight)
+                }
+
+                // Big self-timer countdown, above everything.
+                countdownOverlay.allowsHitTesting(false)
+            }
+            .ignoresSafeArea()
+            .onAppear {
+                // No animation on first read: if the phone was already
+                // physically landscape (rotate-to-open), there's no rotation
+                // to wait out and the controls should just be there.
+                isLandscapeReady = screen.size.width > screen.size.height
+                safeArea = Self.windowSafeArea()
+                // Covers rotate-to-open, where the interface is already
+                // landscape and no size change will fire below.
+                camera.applyInterfaceRotation()
+            }
+            .onChange(of: screen.size) { _, newSize in
+                // Geometry settling is the one signal that the rotation is
+                // done, so it's also when the window's insets are final — and
+                // when the capture connections need the new angle.
+                safeArea = Self.windowSafeArea()
+                camera.applyInterfaceRotation()
+                let landscape = newSize.width > newSize.height
+                guard landscape != isLandscapeReady else { return }
+                withAnimation(.easeOut(duration: 0.22)) { isLandscapeReady = landscape }
+            }
         }
         // Seed the duration from the launching context, push its cap into the
         // session before the first recording, and force the interface into
@@ -306,6 +413,7 @@ struct CameraCaptureView: View {
             PostCaptureReview(
                 media: media,
                 look: look,
+                logSync: logSync,
                 onRetake: { captured = nil },
                 onSent: { dismiss() }
             )
@@ -322,7 +430,7 @@ struct CameraCaptureView: View {
         GeometryReader { geo in
             Group {
                 if camera.hasCamera {
-                    CameraPreview(session: camera.session)
+                    CameraPreview(session: camera.session, rotationAngle: camera.rotationAngle)
                 } else {
                     TimeOfDayCard()
                 }
@@ -398,55 +506,97 @@ struct CameraCaptureView: View {
         }
     }
 
-    /// The camera is landscape-only. Shutter pinned to the right edge and
-    /// vertically centred (right-thumb zone); flip/flash/gallery stacked just
-    /// left of it; close top-leading; grid + self-timer + looks + duration
-    /// top-trailing; mode strip and (when open) the looks carousel along the
-    /// bottom, inset so they clear the shutter cluster.
-    private var landscapeControls: some View {
+    /// The viewfinder itself: an aspect-locked 16:9 card carrying the live
+    /// image plus its own scrims, grid and focus reticle, clipped together so
+    /// none of them spill past its edges.
+    ///
+    /// The ratio is locked to recorded video rather than left to fill whatever
+    /// space the screen happens to have. That is what makes it read as a
+    /// deliberate landscape frame — and it means what you compose in the card
+    /// is what the clip actually contains.
+    private var viewfinderCard: some View {
         ZStack {
-            // Top bar.
-            VStack {
-                HStack(alignment: .top) {
-                    closeButton
-                    Spacer()
-                    HStack(spacing: 10) {
-                        gridButton
-                        selfTimerButton
-                        looksButton
-                        durationPill
-                    }
-                }
-                Spacer()
-            }
+            viewfinderLayer
+            edgeScrims.allowsHitTesting(false)
+            if showGrid { RuleOfThirdsGrid().allowsHitTesting(false) }
+            focusReticleLayer.allowsHitTesting(false)
+            // The hour banner, burned across the frame exactly as it will read
+            // on the finished log. Live, so it rolls over at the top of the
+            // hour instead of freezing at whatever hour the camera opened in.
+            LiveHourOverlay()
+        }
+        // Order matters: the ratio is locked *first*, so the clip and the rim
+        // wrap the 16:9 box itself. Expanding the frame before them drew the
+        // card's outline around the whole leftover region instead, with the
+        // image floating 16:9 inside a much wider ring.
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Theme.glassRimTop, lineWidth: 1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
-            topReadouts.padding(.top, 4)
-
-            // Mode strip along the bottom; looks carousel rises just above it.
-            // Both are inset from the trailing edge so they clear the right-edge
-            // shutter cluster.
-            VStack(spacing: 12) {
-                Spacer()
-                if showLooks { looksCarousel }
-                modeStrip
-            }
-            .padding(.trailing, 150)
-
-            // Shutter cluster on the trailing edge, vertically centred.
-            HStack {
-                Spacer()
-                HStack(spacing: 18) {
-                    VStack(spacing: 16) {
-                        flipButton
-                        flashButton
-                        galleryButton
-                    }
-                    shutter
-                }
+    /// Letterbox band above the card: close at the screen's top-left corner,
+    /// the utility group (grid, self-timer, looks, duration) on the trailing
+    /// side. Both sit in the margin, not over the live image.
+    private var topBand: some View {
+        HStack(alignment: .center) {
+            closeButton
+            Spacer(minLength: 12)
+            // Zero spacing on purpose: every control carries a 44pt tap target
+            // around a 34pt disc, so the 10pt of overhang *is* the gap — and
+            // it's the same gap in the row and in the side stack below.
+            HStack(spacing: 0) {
+                gridButton
+                selfTimerButton
+                looksButton
+                durationPill
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .frame(height: topBandHeight)
+        .modifier(ControlsReady(ready: isLandscapeReady))
+    }
+
+    /// Letterbox band below the card, holding the capture-mode strip.
+    private var bottomBand: some View {
+        modeStrip
+            .frame(maxWidth: .infinity)
+            .frame(height: bottomBandHeight)
+            .modifier(ControlsReady(ready: isLandscapeReady))
+    }
+
+    /// Trailing column beside the card: the flip/flash/gallery circles stacked
+    /// just left of the much larger shutter, vertically centred in the
+    /// right-thumb zone so the hierarchy reads at a glance.
+    private var shutterColumn: some View {
+        HStack(spacing: 6) {
+            VStack(spacing: 0) {
+                flipButton
+                flashButton
+                galleryButton
+            }
+            shutter
+        }
+        .frame(width: shutterColumnWidth)
+        .modifier(ControlsReady(ready: isLandscapeReady))
+    }
+
+    /// Holds the chrome invisible until the interface has actually finished
+    /// rotating to landscape, then fades it in — see `isLandscapeReady`.
+    ///
+    /// Applied per band rather than to the whole stack: the bands are part of
+    /// the layout now, so fading the container would take the viewfinder with
+    /// it. Reserving the space either way is also what stops the card resizing
+    /// under the fade.
+    private struct ControlsReady: ViewModifier {
+        let ready: Bool
+        func body(content: Content) -> some View {
+            content
+                .opacity(ready ? 1 : 0)
+                .allowsHitTesting(ready)
+        }
     }
 
     // MARK: - Shutter
@@ -553,25 +703,24 @@ struct CameraCaptureView: View {
     }
 
     /// Gallery / last-capture thumbnail → opens the system photo picker to pull
-    /// an existing shot into the send flow.
+    /// an existing shot into the send flow. A clean standalone glass circle, the
+    /// same treatment as the flip/flash buttons above it, so the right cluster
+    /// reads as one evenly spaced group — nothing tethered or floating.
     private var galleryButton: some View {
         PhotosPicker(selection: $pickedItem, matching: .images) {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Theme.glassTint)
+            Image(systemName: "photo.on.rectangle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: CameraChrome.controlSize, height: CameraChrome.controlSize)
+                .background {
+                    Circle().fill(.ultraThinMaterial)
+                    Circle().fill(Theme.glassTint)
                 }
                 .overlay {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(.white)
+                    Circle().strokeBorder(Theme.glassRimTop, lineWidth: 0.75)
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Theme.glassRimTop, lineWidth: 0.75)
-                }
-                .frame(width: 46, height: 46)
+                .contentShape(.rect)
+                .frame(width: CameraChrome.tapTarget, height: CameraChrome.tapTarget)
         }
         .accessibilityLabel("Open gallery")
     }
@@ -584,21 +733,23 @@ struct CameraCaptureView: View {
                 maxVideoDuration = maxVideoDuration.toggled
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: "video")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                 Text(maxVideoDuration.label)
-                    .font(.system(size: 14, weight: .semibold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
                     .contentTransition(.numericText())
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .frame(height: 44)
+            .padding(.horizontal, 10)
+            .frame(height: CameraChrome.controlSize)
             .background {
                 Capsule(style: .continuous).fill(.ultraThinMaterial)
                 Capsule(style: .continuous).fill(Theme.glassTint)
             }
             .overlay(Capsule(style: .continuous).strokeBorder(Theme.coral, lineWidth: 1.5))
+            .contentShape(.capsule)
+            .frame(height: CameraChrome.tapTarget)
         }
         .accessibilityLabel("Maximum video length")
         .accessibilityValue(maxVideoDuration.label)
@@ -917,7 +1068,7 @@ private struct ShutterButton: View {
     var onZoomDrag: (CGFloat) -> Void
     var onGestureEnd: () -> Void
 
-    private let size: CGFloat = 82
+    private let size: CGFloat = 74
 
     @State private var progress: CGFloat = 0
     @State private var isPressed = false
@@ -930,13 +1081,13 @@ private struct ShutterButton: View {
         ZStack {
             // Outer white ring.
             Circle()
-                .stroke(.white, lineWidth: 5)
+                .stroke(.white, lineWidth: 4.5)
                 .frame(width: size, height: size)
 
             // Coral progress arc, drawn over the ring while recording.
             Circle()
                 .trim(from: 0, to: progress)
-                .stroke(Theme.coral, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(Theme.coral, style: StrokeStyle(lineWidth: 4.5, lineCap: .round))
                 .frame(width: size, height: size)
                 .rotationEffect(.degrees(-90))
                 .shadow(color: Theme.coralGlow.opacity(0.8), radius: 8)
@@ -944,7 +1095,7 @@ private struct ShutterButton: View {
             // Coral-tinted inner fill; shrinks while recording.
             Circle()
                 .fill(Theme.coralGradient)
-                .frame(width: isRecording ? 34 : 64, height: isRecording ? 34 : 64)
+                .frame(width: isRecording ? 30 : 58, height: isRecording ? 30 : 58)
                 .brightness(isPressed ? 0.08 : 0)
                 .shadow(color: Theme.coralGlow.opacity(glow ? 0.75 : 0.4),
                         radius: glow ? 22 : 14)
@@ -1019,7 +1170,11 @@ private struct ShutterButton: View {
 // MARK: - Glass controls
 
 /// A translucent dark-glass circle with a white line icon. Turns coral when
-/// active. The shared secondary-control treatment (≥44pt hit target).
+/// active. The shared secondary-control treatment: small and quiet, so the
+/// cluster frames the preview instead of competing with it and the shutter
+/// stays the one prominent element. The disc is `CameraChrome.controlSize`;
+/// an invisible 44pt tap target rides underneath so shrinking the visual
+/// doesn't shrink what a thumb has to hit.
 private struct GlassIconButton: View {
     let system: String
     var isActive: Bool = false
@@ -1028,9 +1183,9 @@ private struct GlassIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 18, weight: .medium))
+                .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(isActive ? Theme.coral : .white)
-                .frame(width: 46, height: 46)
+                .frame(width: CameraChrome.controlSize, height: CameraChrome.controlSize)
                 .background {
                     Circle().fill(.ultraThinMaterial)
                     Circle().fill(isActive ? Theme.coral.opacity(0.16) : Theme.glassTint)
@@ -1039,9 +1194,20 @@ private struct GlassIconButton: View {
                     Circle().strokeBorder(isActive ? Theme.coral.opacity(0.7) : Theme.glassRimTop,
                                           lineWidth: isActive ? 1.5 : 0.75)
                 }
+                .contentShape(.rect)
+                .frame(width: CameraChrome.tapTarget, height: CameraChrome.tapTarget)
         }
         .buttonStyle(.plain)
     }
+}
+
+/// Shared metrics for the camera's secondary chrome, so the top row, the side
+/// stack and the duration pill can't drift apart from each other.
+enum CameraChrome {
+    /// Visible diameter/height of a secondary control.
+    static let controlSize: CGFloat = 34
+    /// Hit area around it — never smaller than the 44pt minimum.
+    static let tapTarget: CGFloat = 44
 }
 
 /// One round look/lens swatch in the creative carousel: a gradient chip that
@@ -1157,16 +1323,16 @@ private struct TimeOfDayCard: View {
                 )
                 .blendMode(.plusLighter)
 
-                // Hour, big and calm, with a quiet caption beneath.
-                VStack(spacing: 8) {
-                    Text(context.date.formatted(.dateTime.hour()))
-                        .font(.system(size: 64, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+                // Just the caption, sat below centre. The hour used to be drawn
+                // here too; the viewfinder's own hour banner now sits over this
+                // card and the two rendered on top of each other.
+                VStack {
+                    Spacer()
                     Text("no camera here — composing a vibe clip")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.white.opacity(0.7))
                 }
+                .padding(.bottom, 18)
             }
         }
         .onAppear {
@@ -1285,6 +1451,9 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var flashMode: FlashMode = .off
     /// Current optical/digital zoom, mirrored for the ×-indicator.
     @Published var zoomFactor: CGFloat = 1
+    /// Rotation currently pushed onto the capture connections, in degrees.
+    /// Published so the preview layer picks up the same angle the outputs use.
+    @Published private(set) var rotationAngle: CGFloat = 0
 
     private let movieOutput = AVCaptureMovieFileOutput()
     private let photoOutput = AVCapturePhotoOutput()
@@ -1336,8 +1505,55 @@ final class CameraModel: NSObject, ObservableObject {
         movieOutput.maxRecordedDuration = CMTime(seconds: maxDuration, preferredTimescale: 600)
         session.commitConfiguration()
 
+        // Fresh outputs come back with the sensor's native rotation, so the
+        // interface's angle has to be re-pushed after every (re)configure —
+        // including the one behind `flip()`.
+        Task { @MainActor in self.applyInterfaceRotation() }
+
         // Reset zoom to the device's baseline on (re)configure.
         zoomFactor = 1
+    }
+
+    // MARK: Orientation
+
+    /// The rotation the capture connections need, in degrees, derived from the
+    /// orientation the interface actually settled on.
+    ///
+    /// `InterfaceOrientationLock.lockLandscape()` applies the `.landscape`
+    /// mask, which permits *both* landscape edges — the system picks whichever
+    /// matches how the phone is held. So this can't be a constant matching "the"
+    /// locked orientation; there isn't one.
+    @MainActor
+    static func interfaceRotationAngle() -> CGFloat {
+        let orientation = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }?
+            .interfaceOrientation
+        switch orientation {
+        case .landscapeRight: return 0
+        case .landscapeLeft: return 180
+        case .portraitUpsideDown: return 270
+        default: return 90  // .portrait, and anything unknown
+        }
+    }
+
+    /// Pushes the interface's rotation onto every capture connection.
+    ///
+    /// AVFoundation connections default to the sensor's native orientation and
+    /// never follow a UI-level orientation lock on their own — without this the
+    /// preview and the recorded file both stay portrait-oriented underneath a
+    /// landscape-locked interface, which is exactly the bug this fixes.
+    @MainActor
+    func applyInterfaceRotation() {
+        let angle = Self.interfaceRotationAngle()
+        rotationAngle = angle
+        // Rotating mid-recording would splice two orientations into one file.
+        guard !isRecording else { return }
+        for output in [movieOutput as AVCaptureOutput, photoOutput] {
+            guard let connection = output.connection(with: .video),
+                  connection.isVideoRotationAngleSupported(angle) else { continue }
+            connection.videoRotationAngle = angle
+        }
     }
 
     /// Re-caps an already-running session (e.g. capture reopened from Places).
@@ -1466,27 +1682,108 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
             }
             let fileName = "photo-\(UUID().uuidString).jpg"
             let url = URL.documentsDirectory.appending(path: fileName)
-            try? data.write(to: url)
+            let corrected = Self.orientedJPEG(from: data, rotationAngle: self.rotationAngle) ?? data
+            try? corrected.write(to: url)
             self.photoCompletion?(fileName)
             self.photoCompletion = nil
         }
+    }
+
+    /// Bakes the capture's rotation into the still's pixel data.
+    ///
+    /// `applyInterfaceRotation` sets the same `videoRotationAngle` on the photo
+    /// connection as on the movie connection, and video comes out correct — but
+    /// `AVCapturePhotoOutput` doesn't honour that angle as reliably as
+    /// `AVCaptureMovieFileOutput` does, so the still can come back shaped or
+    /// tagged differently from what the angle implied. Rather than trusting the
+    /// connection, this checks the decoded result against the angle and fixes
+    /// it if they disagree.
+    ///
+    /// The output is always `.up` with the rotation in the pixels, so nothing
+    /// downstream has to agree about EXIF: the review screen, the upload and the
+    /// feed all read the same image.
+    static func orientedJPEG(from data: Data, rotationAngle: CGFloat) -> Data? {
+        guard let image = UIImage(data: data) else { return nil }
+
+        let wantsLandscape = rotationAngle == 0 || rotationAngle == 180
+        // `size` is the *displayed* size — EXIF already applied.
+        let isLandscape = image.size.width > image.size.height
+
+        // Right shape and already flat: the file is fine as it stands.
+        if isLandscape == wantsLandscape, image.imageOrientation == .up { return data }
+
+        // A quarter turn only when the shape is wrong. When it's merely tagged,
+        // redrawing flattens the tag into the pixels and changes nothing else.
+        //
+        // Direction is derived from which landscape edge the interface is on.
+        // If a still ever comes out rotated the *wrong* way, this sign is the
+        // one thing to flip — the log line below says which branch ran.
+        let quarterTurn: CGFloat
+        if isLandscape == wantsLandscape {
+            quarterTurn = 0
+        } else {
+            quarterTurn = rotationAngle == 180 ? -.pi / 2 : .pi / 2
+        }
+
+        let targetSize = quarterTurn == 0
+            ? image.size
+            : CGSize(width: image.size.height, height: image.size.width)
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = image.scale
+        format.opaque = true
+        let rendered = UIGraphicsImageRenderer(size: targetSize, format: format).image { context in
+            let cgContext = context.cgContext
+            cgContext.translateBy(x: targetSize.width / 2, y: targetSize.height / 2)
+            cgContext.rotate(by: quarterTurn)
+            // `draw` applies `imageOrientation`, so this flattens EXIF too.
+            image.draw(in: CGRect(x: -image.size.width / 2,
+                                  y: -image.size.height / 2,
+                                  width: image.size.width,
+                                  height: image.size.height))
+        }
+
+        cameraLog.info("""
+            still corrected: angle=\(rotationAngle, privacy: .public) \
+            wantsLandscape=\(wantsLandscape, privacy: .public) \
+            was=\(Int(image.size.width))x\(Int(image.size.height)) \
+            exif=\(image.imageOrientation.rawValue, privacy: .public) \
+            turn=\(Int(quarterTurn * 180 / .pi), privacy: .public)°
+            """)
+
+        return rendered.jpegData(compressionQuality: 0.9)
     }
 }
 
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
+    /// Same angle the outputs are given, so the viewfinder can't disagree with
+    /// the file it produces. See `CameraModel.applyInterfaceRotation`.
+    var rotationAngle: CGFloat
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
+        view.applyRotation(rotationAngle)
         return view
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    func updateUIView(_ uiView: PreviewView, context: Context) {
+        uiView.applyRotation(rotationAngle)
+    }
 
     final class PreviewView: UIView {
         override static var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+
+        /// The preview layer owns its own connection, which needs the rotation
+        /// pushed onto it separately from the outputs'.
+        func applyRotation(_ angle: CGFloat) {
+            guard let connection = previewLayer.connection,
+                  connection.isVideoRotationAngleSupported(angle),
+                  connection.videoRotationAngle != angle else { return }
+            connection.videoRotationAngle = angle
+        }
     }
 }

@@ -39,7 +39,7 @@ struct MontageView: View {
                     HStack(spacing: 4) {
                         ForEach(0..<todaysClips.count, id: \.self) { i in
                             Capsule()
-                                .fill(i <= index ? Theme.iris : .white.opacity(0.3))
+                                .fill(i <= index ? Theme.accent : .white.opacity(0.3))
                                 .frame(height: 3)
                         }
                     }
@@ -67,7 +67,7 @@ struct MontageView: View {
                             Text(clip.label)
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(.white)
-                            Text(clip.capturedAt.clockTime)
+                            Text(clip.capturedAt.hourOnlyClockTime)
                                 .font(.caption)
                                 .foregroundStyle(.white.opacity(0.7))
                         }
