@@ -171,6 +171,10 @@ struct SendToFriendsView: View {
         let finalLabel = label.isEmpty ? "right now" : label
         let calendar = Calendar.current
         var created: [Clip] = []
+        /// Everyone the published copy is actually addressed to, gathered as the
+        /// chats are walked. Without this the server only learned that you
+        /// posted, never who for, and handed the log to every friend you have.
+        var recipients: Set<String> = []
         for chat in chats where selected.contains(chat.id) {
             // Streak bumps on the first log of the day to that chat.
             let loggedTodayAlready = chat.clips.contains {
@@ -184,6 +188,12 @@ struct SendToFriendsView: View {
             chat.clips.append(clip)
             chat.lastSentAt = .now
             if !loggedTodayAlready { chat.streak += 1 }
+            // A DM's one other member, or every member of a crew. Demo rows
+            // have no uid and contribute nothing — there's no account on the
+            // server for them to reach.
+            for member in chat.members where !member.isMe && !member.remoteUID.isEmpty {
+                recipients.insert(member.remoteUID)
+            }
         }
         try? modelContext.save()
 
@@ -192,9 +202,25 @@ struct SendToFriendsView: View {
         // capture flow, and publish the media once.
         //
         // Only the first copy is published: sending the same capture to three
-        // chats is one log to your friends, not three.
+        // chats is one log to your friends, not three. It carries the union of
+        // every selected chat's members, so one upload still reaches exactly
+        // the people who were picked and nobody else.
         if let first = created.first {
-            Task { await logSync.publish(first, context: modelContext) }
+            let addressed = Array(recipients)
+            // Recorded on the clip as well as passed here, so a retry after a
+            // failed upload goes to the same people rather than reverting to
+            // the whole roster (see `Clip.intendedRecipientUIDs`).
+            first.intendedRecipientUIDs = addressed
+            try? modelContext.save()
+
+            // A selection that resolves to no real account — a roster of demo
+            // rows only — has nobody on the server to receive it. Publishing
+            // anyway would mean an unaddressed log, which the server still
+            // reads as "all your friends": the exact leak this scoping closes.
+            // The capture stays local, the same as it does with no network.
+            if !addressed.isEmpty {
+                Task { await logSync.publish(first, context: modelContext, recipientUids: addressed) }
+            }
         }
 
         dismiss()
@@ -413,6 +439,10 @@ struct PublicPlacePostView: View {
                                   // the emoji placeholder.
                                   kind: media.kind,
                                   assetFileName: media.assetFileName)
+            // Your own post shows your own photo straight away, rather than
+            // waiting for the public feed to sync your own log back to you.
+            mirror.authorAvatarURL = me?.avatarURL ?? ""
+            mirror.authorAvatarEmoji = me?.emoji ?? ""
             modelContext.insert(mirror)
             spotClip = mirror
         }

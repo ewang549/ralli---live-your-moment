@@ -24,6 +24,69 @@ enum SeedData {
 #endif
     }
 
+    /// Removes every seeded row from the local store, leaving the real account
+    /// and real friends untouched. Returns whether anything was actually there.
+    ///
+    /// Deliberately **not** `#if DEBUG`. Seeding is Debug-only, but the store
+    /// it writes into is the same one a real signed-in account uses — so any
+    /// device that ever ran a Debug build against a real account (i.e. every
+    /// device this has been developed on) still has Jordan, Maya and Sam
+    /// sitting in its roster, emoji-only and photoless, in a TestFlight build
+    /// with no way to clear them. Nothing else removes them either:
+    /// `FriendGraph.sync`'s un-friend pass only considers rows with a
+    /// `remoteUID`, and demo rows have none. So this runs on every real
+    /// profile resolve rather than behind a Debug-only button.
+    ///
+    /// Everything hanging off a demo friend goes with them — their clips,
+    /// messages and hosted beacons — since a row whose author has been deleted
+    /// stays in the store as an unattributed ghost rather than disappearing.
+    @MainActor
+    @discardableResult
+    static func purgeDemoData(context: ModelContext) -> Bool {
+        let friends = (try? context.fetch(FetchDescriptor<Friend>())) ?? []
+        // The "me" row is never deleted, only un-flagged: `seed` marks a demo
+        // "me" it created, and `FirestoreService.cacheLocally` will happily
+        // adopt that same row for a real account without clearing the flag.
+        // Deleting it would take the user's own profile with it.
+        for friend in friends where friend.isDemo && friend.isMe {
+            friend.isDemo = false
+        }
+
+        let demo = friends.filter { $0.isDemo && !$0.isMe }
+        guard !demo.isEmpty else {
+            try? context.save()
+            return false
+        }
+        let demoIDs = Set(demo.map(\.id))
+        func isDemoRow(_ friend: Friend?) -> Bool {
+            guard let friend else { return false }
+            return demoIDs.contains(friend.id)
+        }
+
+        for clip in (try? context.fetch(FetchDescriptor<Clip>())) ?? [] where isDemoRow(clip.author) {
+            context.delete(clip)
+        }
+        for message in (try? context.fetch(FetchDescriptor<Message>())) ?? [] where isDemoRow(message.author) {
+            context.delete(message)
+        }
+        for beacon in (try? context.fetch(FetchDescriptor<Beacon>())) ?? [] where isDemoRow(beacon.host) {
+            context.delete(beacon)
+        }
+        for friend in demo {
+            context.delete(friend)
+        }
+
+        // Threads that had nobody in them but demo people. Left standing they
+        // show up in every thread and audience list as "Just me" for good.
+        for chat in (try? context.fetch(FetchDescriptor<Chat>())) ?? []
+        where chat.members.isEmpty || chat.members.allSatisfy({ $0.isMe || demoIDs.contains($0.id) }) {
+            context.delete(chat)
+        }
+
+        try? context.save()
+        return true
+    }
+
 #if DEBUG
     /// True when the demo roster is already loaded.
     @MainActor

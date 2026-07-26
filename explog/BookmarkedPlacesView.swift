@@ -10,6 +10,7 @@ struct BookmarkedPlacesView: View {
     @Query(sort: \SpotClip.capturedAt, order: .reverse) private var clips: [SpotClip]
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppRouter.self) private var router
 
     private var saved: [SpotClip] { clips.filter(\.savedByMe) }
 
@@ -48,9 +49,18 @@ struct BookmarkedPlacesView: View {
                 // Same media ladder as the Places feed — a saved card showing
                 // the emoji placeholder for a clip with real media reads as a
                 // different (missing) post than the one that was bookmarked.
-                ClipMediaView(spotClip: clip, isActive: false)
-                    .aspectRatio(9.0 / 16.0, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                //
+                // The thumbnail is the tap target: the card used to render the
+                // media and nothing else, so a bookmark could be removed but
+                // never re-watched. The bookmark button sits above it in the
+                // ZStack and keeps its own tap target.
+                Button { open(clip) } label: {
+                    ClipMediaView(spotClip: clip, isActive: false)
+                        .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(PressScaleStyle())
 
                 Button {
                     clip.savedByMe = false
@@ -75,6 +85,16 @@ struct BookmarkedPlacesView: View {
                 .foregroundStyle(.white.opacity(0.6))
                 .lineLimit(1)
         }
+    }
+
+    /// Opens a saved clip in the Places feed itself rather than in a second
+    /// player built just for this screen — the feed *is* the viewer, and it
+    /// already knows how to land on one clip and autoplay it (the same deep
+    /// link a Highlights card on a public profile uses).
+    private func open(_ clip: SpotClip) {
+        router.tab = .places
+        router.focusedPlaceClipId = clip.id
+        dismiss()
     }
 
     private var emptyState: some View {

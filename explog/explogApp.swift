@@ -38,7 +38,28 @@ enum InterfaceOrientationLock {
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: newMask)) { _ in }
         // Nudge the system to re-read `supportedInterfaceOrientationsFor`, so it
         // doesn't immediately snap the interface back toward the old mask.
-        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        //
+        // Every controller up the presentation chain, not just the root: the
+        // camera comes up in a full-screen cover, and iOS asks the *presented*
+        // controller what it supports. Telling only the root to re-check left
+        // the cover still reporting the previous mask, which is how the
+        // viewfinder could come up vertical despite the lock being set.
+        for controller in presentationChain(from: scene.keyWindow?.rootViewController) {
+            controller.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+    }
+
+    /// A view controller and everything it has presented, root-most first.
+    @MainActor private static func presentationChain(
+        from root: UIViewController?
+    ) -> [UIViewController] {
+        var chain: [UIViewController] = []
+        var next = root
+        while let controller = next {
+            chain.append(controller)
+            next = controller.presentedViewController
+        }
+        return chain
     }
 }
 

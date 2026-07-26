@@ -24,9 +24,15 @@ struct BeaconsFeedView: View {
 
     private var me: Friend? { friends.first { $0.isMe } }
 
+    /// Friends and Public aren't opposites: a friend hosting a public beacon
+    /// belongs in both. The Friends segment used to exclude anything marked
+    /// public, so a friend's open invite never appeared there at all. It asks
+    /// who's hosting instead — `host` only resolves for someone with a local
+    /// `Friend` row, i.e. an actual friend (or you), so a stranger's public
+    /// beacon still stays out of it.
     private var filtered: [Beacon] {
         beacons
-            .filter { segment == .publicFeed ? $0.isPublic : !$0.isPublic }
+            .filter { segment == .publicFeed ? $0.isPublic : $0.host != nil }
             .sorted { $0.startsAt < $1.startsAt }
     }
 
@@ -39,8 +45,10 @@ struct BeaconsFeedView: View {
 
                 // Friends ↔ Public as a single segmented pill: the active segment
                 // is coral-washed with its count in a small coral pill.
+                // Counts read off the same rules `filtered` applies, or the
+                // badge promises rows the segment won't show.
                 BeaconSegments(segment: $segment,
-                               friendsCount: beacons.filter { !$0.isPublic }.count,
+                               friendsCount: beacons.filter { $0.host != nil }.count,
                                publicCount: beacons.filter { $0.isPublic }.count)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 14)

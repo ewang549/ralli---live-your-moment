@@ -132,20 +132,20 @@ struct GlassOrbAvatar: View {
 
     var body: some View {
         ZStack {
-            if let photoURL, let uiImage = UIImage(contentsOfFile: photoURL.path) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFill()
-            } else if let remotePhotoURL {
-                AsyncImage(url: remotePhotoURL) { image in
+            if photoURL != nil || remotePhotoURL != nil {
+                // This account has a real photo, so the emoji is never the
+                // right thing to draw — not even for the moment the photo takes
+                // to arrive. Showing it there is what made a set profile picture
+                // read as "still the default": the orb appeared first and the
+                // photo replaced it a beat later, on every single appearance,
+                // because `AsyncImage` began from scratch each time the row was
+                // rebuilt. `CachedImage` renders from cache on the first frame
+                // once seen, and falls back to a plain disc rather than the
+                // emoji on a genuinely cold load.
+                CachedImage(localURL: photoURL, remoteURL: remotePhotoURL) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {
-                    // The emoji orb stays put while the photo loads, so the
-                    // avatar never flashes empty.
-                    ZStack {
-                        Circle().fill(Theme.avatarGradient(hue: hue))
-                        Text(emoji).font(.system(size: size * 0.5))
-                    }
+                    Circle().fill(Theme.avatarGradient(hue: hue))
                 }
             } else {
                 Circle().fill(Theme.avatarGradient(hue: hue))
@@ -170,9 +170,34 @@ struct GlassOrbAvatar: View {
 
 /// Convenience overload so existing `Friend` rows can adopt the avatar look.
 extension GlassOrbAvatar {
+    /// Both photo tiers are passed, not just the local one.
+    ///
+    /// This used to hand over `photoURL` alone, and `avatarPhotoFileName` is
+    /// only ever set for a photo picked on *this* device — so every friend's
+    /// uploaded photo was dropped here and every orb this init produced (Pulse,
+    /// beacon hosts, attendee rosters, the group-chat picker) fell back to the
+    /// emoji, however many real photos the accounts behind them had.
     init(friend: Friend, size: CGFloat = 44, isActive: Bool = false) {
         self.init(emoji: friend.emoji, hue: friend.hue, size: size, isActive: isActive,
-                  photoURL: friend.avatarPhotoURL)
+                  photoURL: friend.avatarPhotoURL,
+                  remotePhotoURL: friend.avatarRemotePhotoURL)
+    }
+
+    /// Same, for an account there's no local row for — search results, friend
+    /// requests, the block list. `publicProfile` has always returned
+    /// `avatarURL`; every one of these call sites was passing the emoji alone
+    /// and throwing the photo away.
+    init(profile: RemoteProfile, size: CGFloat = 44, isActive: Bool = false) {
+        self.init(emoji: profile.avatarEmoji, hue: 0.58, size: size, isActive: isActive,
+                  remotePhotoURL: profile.avatarPhotoURL)
+    }
+}
+
+extension RemoteProfile {
+    /// This account's uploaded photo, when it has one.
+    var avatarPhotoURL: URL? {
+        guard let avatarURL, !avatarURL.isEmpty else { return nil }
+        return URL(string: avatarURL)
     }
 }
 

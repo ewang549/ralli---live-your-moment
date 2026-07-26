@@ -359,17 +359,13 @@ struct UserProfileView: View {
 
     private var demoLoaded: Bool { friends.contains { $0.isDemo } }
 
-    /// Removes only the seeded rows, leaving the real account intact. Chats and
-    /// clips go too, since every one of them references a demo friend.
+    /// Removes only the seeded rows, leaving the real account intact.
+    ///
+    /// The cleanup itself lives in `SeedData` and is no longer Debug-only —
+    /// a real account gets it automatically on every profile resolve. This
+    /// button is just the manual trigger for a signed-out dev build.
     private func clearDemoData() {
-        for friend in friends where friend.isDemo {
-            modelContext.delete(friend)
-        }
-        let chats = (try? modelContext.fetch(FetchDescriptor<Chat>())) ?? []
-        for chat in chats where chat.members.isEmpty || chat.members.allSatisfy({ $0.isMe }) {
-            modelContext.delete(chat)
-        }
-        try? modelContext.save()
+        SeedData.purgeDemoData(context: modelContext)
     }
 #endif
 
@@ -589,6 +585,18 @@ struct PublicProfileSheet: View {
     }
 
     private var isRemote: Bool { !uid.isEmpty }
+
+    /// This sheet is showing the signed-in user their own account.
+    ///
+    /// Reachable without going through the Profile tab — finding yourself in
+    /// search, or tapping your own name on a public feed, opens this sheet for
+    /// your own uid with no local "me" `Friend` row resolved. Nothing stopped
+    /// the relationship actions from firing there, so you could follow (and
+    /// then unfollow) yourself.
+    private var isMe: Bool {
+        isRemote && uid == Auth.auth().currentUser?.uid
+    }
+
     private var displayName: String { remote?.name ?? fallbackName }
 
     /// This account's profile photo as held on the server. Empty-string URLs
@@ -634,7 +642,10 @@ struct PublicProfileSheet: View {
                         } else {
                             details
                         }
-                        if isRemote { actionRow }
+                        // No relationship actions on your own account: follow,
+                        // add friend, message and block are all things you do
+                        // to somebody else.
+                        if isRemote && !isMe { actionRow }
                         if !detailsHidden && !highlights.isEmpty { highlightsSection }
                         Spacer(minLength: 20)
                     }
@@ -656,7 +667,9 @@ struct PublicProfileSheet: View {
                     }
                     .accessibilityLabel("Close")
                 }
-                if isRemote {
+                // Same reasoning as `actionRow`: reporting or blocking
+                // yourself isn't a thing.
+                if isRemote && !isMe {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             SafetyMenuItems(
@@ -699,13 +712,14 @@ struct PublicProfileSheet: View {
             // A local row's own photo wins; otherwise fall back to whatever the
             // server holds for this account, and to the emoji orb if it holds
             // nothing.
-            if let friend, friend.avatarPhotoURL != nil {
-                AvatarView(friend: friend, size: 84)
-            } else {
-                GlassOrbAvatar(emoji: remote?.avatarEmoji ?? friend?.emoji ?? fallbackEmoji,
-                               hue: friend?.hue ?? 0.58, size: 84, isActive: false,
-                               remotePhotoURL: remoteAvatarURL)
-            }
+            GlassOrbAvatar(emoji: remote?.avatarEmoji ?? friend?.emoji ?? fallbackEmoji,
+                           hue: friend?.hue ?? 0.58, size: 84, isActive: false,
+                           photoURL: friend?.avatarPhotoURL,
+                           // The local row's own copy of the photo covers the
+                           // window before the profile finishes loading —
+                           // otherwise opening a friend you have a photo for
+                           // showed the emoji orb until the network came back.
+                           remotePhotoURL: remoteAvatarURL ?? friend?.avatarRemotePhotoURL)
             Text(displayName)
                 .font(.title2.weight(.bold))
                 .foregroundStyle(Theme.textPrimary)
@@ -894,7 +908,10 @@ struct PublicProfileSheet: View {
     /// Flips the button and the count on the spot, then reconciles with the
     /// server — and puts both back exactly as they were if the call fails.
     private func toggleFollow() {
-        guard isRemote, !followWorking else { return }
+        // Guarded here as well as by hiding the button: this is the one place
+        // the follow actually happens, and a future entry point that forgets
+        // the `isMe` check shouldn't be able to make you your own follower.
+        guard isRemote, !isMe, !followWorking else { return }
         let wasFollowing = isFollowing
         let previousCount = followerCount
         let profile = profileForActions

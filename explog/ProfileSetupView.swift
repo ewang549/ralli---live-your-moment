@@ -24,6 +24,12 @@ struct ProfileSetupView: View {
     @State private var errorMessage: String?
     /// Debounce token so we only check the handle the user settled on.
     @State private var checkTask: Task<Void, Never>?
+    /// The account, once it exists.
+    ///
+    /// Held so a retry after a failed *photo* upload doesn't try to claim the
+    /// handle a second time — that would come back "already taken" by the
+    /// user's own brand-new account and read as a dead end.
+    @State private var createdProfile: RemoteProfile?
 
     private let avatarOptions = ["🧑‍💻", "🏄", "🎸", "📷", "🧗", "☕️", "🏃", "🎮", "🌊", "⛰️", "🎧", "🍜"]
 
@@ -56,12 +62,28 @@ struct ProfileSetupView: View {
                             .padding(.horizontal, 4)
                     }
 
-                    PrimaryButton(title: "Claim @\(handle.isEmpty ? "handle" : handle)",
+                    PrimaryButton(title: createdProfile == nil
+                                  ? "Claim @\(handle.isEmpty ? "handle" : handle)"
+                                  : "Retry photo upload",
                                busy: busy,
-                               enabled: canSubmit) {
+                               // Once the account exists, the handle checks no
+                               // longer gate anything — only the photo is left.
+                               enabled: createdProfile == nil ? canSubmit : !busy) {
                         submit()
                     }
                     .padding(.top, 2)
+
+                    // Only ever on screen when the account itself was created
+                    // and just the photo didn't make it. Without this the user
+                    // is stuck on a screen whose one button keeps failing.
+                    if let createdProfile, !busy {
+                        Button("Continue without a photo") {
+                            PendingReferral.code = nil
+                            onComplete(createdProfile)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                    }
 
                     Text("Your handle is how friends find you. You can change your name, photo and city later.")
                         .font(.caption2)
@@ -261,14 +283,23 @@ struct ProfileSetupView: View {
         errorMessage = nil
         Task { @MainActor in
             do {
-                let profile = try await FirestoreService.createProfile(
-                    handle: handle,
-                    name: name.trimmingCharacters(in: .whitespaces),
-                    avatarEmoji: avatar,
-                    city: city.trimmingCharacters(in: .whitespaces),
-                    referredBy: PendingReferral.code
-                )
-                FirestoreService.cacheLocally(profile, context: modelContext)
+                let profile: RemoteProfile
+                if let createdProfile {
+                    // Second pass: the account already exists and only the
+                    // photo is outstanding.
+                    profile = createdProfile
+                } else {
+                    profile = try await FirestoreService.createProfile(
+                        handle: handle,
+                        name: name.trimmingCharacters(in: .whitespaces),
+                        avatarEmoji: avatar,
+                        city: city.trimmingCharacters(in: .whitespaces),
+                        referredBy: PendingReferral.code
+                    )
+                    FirestoreService.cacheLocally(profile, context: modelContext)
+                    createdProfile = profile
+                }
+
                 if let avatarPhotoFileName {
                     let descriptor = FetchDescriptor<Friend>()
                     let me = (try? modelContext.fetch(descriptor))?.first { $0.remoteUID == profile.uid }
@@ -280,10 +311,22 @@ struct ProfileSetupView: View {
                     // part of the account once it's in Storage and its URL is
                     // on the profile. Awaited (behind the spinner that's
                     // already up) so onboarding can't finish with the photo
-                    // still on the device only; `try?` because a failed upload
-                    // must not strand a user who has a valid account.
+                    // still on the device only.
+                    //
+                    // Retried rather than `try?`-ed: this runs seconds after
+                    // the account was created, while the auth token may still
+                    // be propagating, and one swallowed failure used to leave
+                    // the profile with no `avatarURL` for good. If it still
+                    // won't go, the user is told instead of finding out later
+                    // that their photo exists on this device only.
                     let localURL = URL.documentsDirectory.appending(path: avatarPhotoFileName)
-                    try? await FirestoreService.uploadAvatarPhoto(at: localURL)
+                    do {
+                        try await FirestoreService.uploadAvatarPhoto(at: localURL, attempts: 3)
+                    } catch {
+                        errorMessage = "Your account is ready, but your photo didn't upload. Tap to try again."
+                        busy = false
+                        return
+                    }
                 }
                 PendingReferral.code = nil
                 onComplete(profile)

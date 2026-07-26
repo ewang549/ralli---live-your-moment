@@ -231,6 +231,23 @@ private struct PlacePage: View {
         clip.authorUID.isEmpty ? (matchedFriend?.remoteUID ?? "") : clip.authorUID
     }
 
+    /// The author's profile photo. The clip carries the copy the server
+    /// denormalised onto it; a roster match is the fallback for a seed clip by
+    /// someone who is already a friend.
+    private var authorAvatarURL: URL? {
+        if !clip.authorAvatarURL.isEmpty, let url = URL(string: clip.authorAvatarURL) {
+            return url
+        }
+        return matchedFriend?.avatarRemotePhotoURL
+    }
+
+    /// The person's own avatar emoji for the placeholder — `clip.emoji` is the
+    /// *clip's* vibe emoji, which is nobody's avatar.
+    private var authorAvatarEmoji: String {
+        if !clip.authorAvatarEmoji.isEmpty { return clip.authorAvatarEmoji }
+        return matchedFriend?.emoji ?? clip.emoji
+    }
+
     /// Following is only offered when there's someone real to follow — seed
     /// clips have no account, and a chip that can't do anything is worse than
     /// no chip.
@@ -246,10 +263,13 @@ private struct PlacePage: View {
                       handle: "",
                       handleDisplay: "",
                       name: clip.authorName,
-                      avatarEmoji: clip.emoji,
+                      avatarEmoji: authorAvatarEmoji,
                       city: "",
                       bio: "",
-                      isPrivate: false)
+                      isPrivate: false,
+                      // So the Following list renders this author's real photo
+                      // straight away instead of an orb until the next refresh.
+                      avatarURL: clip.authorAvatarURL)
     }
 
     var body: some View {
@@ -292,7 +312,8 @@ private struct PlacePage: View {
                 // `authorUID` is the clip's real author when it has one. It's
                 // still empty for seed clips, which the sheet already handles
                 // by hiding the action row rather than offering dead controls.
-                PublicProfileSheet(uid: authorUID, name: clip.authorName, emoji: clip.emoji)
+                PublicProfileSheet(uid: authorUID, name: clip.authorName,
+                                   emoji: authorAvatarEmoji)
             }
         }
     }
@@ -358,7 +379,10 @@ private struct PlacePage: View {
                 } label: {
                     HStack(spacing: 10) {
                         // Coral ring: this clip's author, lit against the media.
-                        GlassOrbAvatar(emoji: clip.emoji, hue: clip.hueA, size: 42, isActive: true)
+                        GlassOrbAvatar(emoji: authorAvatarEmoji, hue: clip.hueA,
+                                       size: 42, isActive: true,
+                                       photoURL: matchedFriend?.avatarPhotoURL,
+                                       remotePhotoURL: authorAvatarURL)
 
                         VStack(alignment: .leading, spacing: 1) {
                             Text(clip.authorName)

@@ -43,6 +43,12 @@ struct StackedClipPane: View {
     /// The real friend behind this pane, when tapping the author should open
     /// their profile. Nil for "you" (nothing to view) and for placeholder panes.
     var authorFriend: Friend?
+    /// Whose profile photo the orb draws.
+    ///
+    /// Separate from `authorFriend`, which is deliberately nil on your own
+    /// pane so tapping it doesn't open your own profile sheet — your avatar
+    /// still has to render there. Nil falls back to the emoji orb.
+    var avatarSource: Friend?
 
     @Environment(ClipSyncClock.self) private var clock
     @State private var showProfile = false
@@ -50,15 +56,18 @@ struct StackedClipPane: View {
     var body: some View {
         ZStack {
             if let clip {
-                ClipView(clip: clip, isActive: true)
-                    // Keying on the clock's cycle is what synchronizes the
-                    // stack: every pane rebuilds its player on the same tick,
-                    // so all clips restart together instead of drifting.
+                ClipView(clip: clip, isActive: true, restartToken: clock.cycle)
+                    // The clock synchronizes the stack by *value*, not by view
+                    // identity: every pane gets the same cycle number and seeks
+                    // its live player back to zero on the same tick.
                     //
-                    // Video only. A photo has nothing to restart, and rebuilding
-                    // one every cycle made a remote photo re-fetch and flash its
-                    // `AsyncImage` placeholder — the emoji orb — on each tick.
-                    .id(clip.kind == .video ? "\(clip.id)-\(clock.cycle)" : "\(clip.id)")
+                    // This used to live in `.id()`, which restarted the panes by
+                    // destroying and rebuilding them. That resynced them, but it
+                    // also threw away each player and reattached a new one only
+                    // after an async asset load, so every cycle boundary blanked
+                    // to black — the "black screen between loops". Identity is
+                    // now the clip alone, so a pane is built once and kept.
+                    .id(clip.id)
             } else {
                 noClipPlaceholder
             }
@@ -128,7 +137,9 @@ struct StackedClipPane: View {
                 HStack(spacing: 9) {
                     // Coral ring marks the author who actually posted this slot.
                     GlassOrbAvatar(emoji: authorEmoji, hue: authorHue, size: 32,
-                                   isActive: clip != nil)
+                                   isActive: clip != nil,
+                                   photoURL: avatarSource?.avatarPhotoURL,
+                                   remotePhotoURL: avatarSource?.avatarRemotePhotoURL)
                     VStack(alignment: .leading, spacing: 1) {
                         if let authorName {
                             Text(authorName)
@@ -289,7 +300,8 @@ struct FriendPairFeedView: View {
                     authorEmoji: friend.emoji,
                     authorHue: friend.hue,
                     roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId,
-                    authorFriend: friend
+                    authorFriend: friend,
+                    avatarSource: friend
                 )
             }
             .frame(height: cardHeight)
@@ -308,7 +320,8 @@ struct FriendPairFeedView: View {
                     authorName: me?.name ?? "You",
                     authorEmoji: me?.emoji ?? "🙂",
                     authorHue: me?.hue ?? 0.58,
-                    roleLabel: "you"
+                    roleLabel: "you",
+                    avatarSource: me
                 )
             }
             .frame(height: cardHeight)
@@ -479,9 +492,17 @@ private struct FriendLogActions: View {
                 // reaction shows up as a message overlaying this clip's
                 // preview. Only on add, so removing a reaction doesn't post.
                 if let chat = resolveChat() {
-                    let message = Message.reaction(emoji, to: clip, from: me, in: chat)
-                    modelContext.insert(message)
-                    chat.messages.append(message)
+                    if StreamConfig.isEnabled {
+                        // The thread this lands in is a real Stream channel,
+                        // and a local `Message` row is invisible to it: the
+                        // reaction has to be an actual message on the channel
+                        // or it reaches neither side's thread.
+                        Task { await StreamThreadPoster.postReaction(emoji, to: clip, in: chat) }
+                    } else {
+                        let message = Message.reaction(emoji, to: clip, from: me, in: chat)
+                        modelContext.insert(message)
+                        chat.messages.append(message)
+                    }
                 }
             }
         }
@@ -614,7 +635,8 @@ struct GroupClipFeedView: View {
                 authorEmoji: entry.friend.emoji,
                 authorHue: entry.friend.hue,
                 roleLabel: entry.friend.isMe ? "you" : nil,
-                authorFriend: entry.friend.isMe ? nil : entry.friend
+                authorFriend: entry.friend.isMe ? nil : entry.friend,
+                avatarSource: entry.friend
             )
         }
         .frame(width: width, height: height)
@@ -698,7 +720,8 @@ struct AllFriendsFeedView: View {
                                 authorHue: friend.hue,
                                 roleLabel: friend.displayUserId.isEmpty ? nil : friend.displayUserId,
                                 headerTopPadding: 96,
-                                authorFriend: friend
+                                authorFriend: friend,
+                                avatarSource: friend
                             )
                             .frame(width: proxy.size.width.safeDimension,
                                    height: proxy.size.height.safeDimension)

@@ -74,7 +74,15 @@ final class LogSync {
         }
     }
 
-    func publish(_ clip: Clip, context: ModelContext, audience: Audience = .friends) async {
+    /// - Parameter recipientUids: For a friends-only log, the accounts it was
+    ///   actually addressed to. Empty means the whole friend roster, which is
+    ///   what publishing has always meant — the share screen passes the people
+    ///   who were picked, so selecting two friends out of ten no longer reaches
+    ///   the other eight.
+    func publish(_ clip: Clip,
+                 context: ModelContext,
+                 audience: Audience = .friends,
+                 recipientUids: [String] = []) async {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         guard !clip.isPublished else { return }
 
@@ -121,6 +129,13 @@ final class LogSync {
             payload["audience"] = audience.wireValue
             if let spotID = audience.spotID {
                 payload["spotId"] = spotID
+            }
+            // Omitted when empty so an unaddressed log keeps the server's
+            // legacy "everyone you're friends with" meaning rather than
+            // becoming a log addressed to nobody.
+            let recipients = recipientUids.filter { !$0.isEmpty }
+            if !recipients.isEmpty {
+                payload["recipientUids"] = Array(Set(recipients))
             }
 
             let response = try await CallableFunctions.call("publishLog",
@@ -196,7 +211,19 @@ final class LogSync {
             let audience: Audience = clip.intendedSpotID.isEmpty
                 ? .friends
                 : .publicAt(spotID: clip.intendedSpotID)
-            await publish(clip, context: context, audience: audience)
+            // A clip that hangs off a chat was addressed to particular people,
+            // and the only record of who they were is on the clip itself. With
+            // that list empty there is nothing to scope the retry to, and
+            // publishing unaddressed means "every friend" server-side — so it
+            // isn't sent at all. This also covers the extra local copies a
+            // multi-chat send makes: only the copy that carries the recipients
+            // is the one meant to go up, the rest are on-device duplicates and
+            // must not each become their own log.
+            if clip.chat != nil, clip.intendedRecipientUIDs.isEmpty { continue }
+            // Same reasoning for the recipient list: a send scoped to two
+            // friends must not come back from a retry as a broadcast.
+            await publish(clip, context: context, audience: audience,
+                          recipientUids: clip.intendedRecipientUIDs)
         }
     }
 
@@ -317,6 +344,11 @@ final class LogSync {
             clip.kindRaw = (ClipKind(rawValue: log.kind) ?? .vibe).rawValue
             clip.authorUID = log.authorUid
             clip.authorName = log.authorName
+            // The server sends both of these on every public log and nothing
+            // used to read them, so the Places feed drew a generic orb for
+            // authors who had a real profile photo the whole time.
+            clip.authorAvatarURL = log.authorAvatarURL
+            clip.authorAvatarEmoji = log.authorAvatarEmoji
             clip.label = log.caption
             clip.emoji = log.emoji
             if clip.spot == nil { clip.spot = spot }

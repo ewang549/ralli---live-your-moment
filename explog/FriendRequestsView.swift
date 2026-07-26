@@ -104,7 +104,7 @@ struct FriendRequestsContent: View {
             HStack(spacing: 12) {
                 Button { openProfile = profile } label: {
                     HStack(spacing: 12) {
-                        GlassOrbAvatar(emoji: profile.avatarEmoji, hue: 0.58, size: 46, isActive: false)
+                        GlassOrbAvatar(profile: profile, size: 46)
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(profile.name)

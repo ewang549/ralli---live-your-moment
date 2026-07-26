@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import FirebaseAuth
 import StreamChat
 import StreamChatSwiftUI
@@ -142,6 +143,14 @@ struct AuthGateView: View {
                     // after a cache wipe, and every screen that resolves "me"
                     // (Profile, montage, capture) has nothing to show.
                     FirestoreService.cacheLocally(profile, context: modelContext)
+                    // A real account has no business holding seeded friends.
+                    // If this device ever ran a Debug build against it, they're
+                    // still in the roster — photoless, un-messageable, and
+                    // untouched by any other cleanup. Self-healing here rather
+                    // than behind the Debug-only "Clear demo" button, which a
+                    // TestFlight build can't reach at all.
+                    SeedData.purgeDemoData(context: modelContext)
+                    retryAvatarUploadIfNeeded(for: profile)
                 }
                 withAnimation { stage = profile == nil ? .needsProfile : .ready }
                 return
@@ -152,6 +161,32 @@ struct AuthGateView: View {
             }
         }
         withAnimation { stage = .needsProfile }
+    }
+
+    /// Re-uploads a profile photo that exists on this device but never reached
+    /// the account.
+    ///
+    /// The onboarding upload used to be a bare `try?`, so a single failure
+    /// during the post-sign-up token race left the account with no `avatarURL`
+    /// forever — the photo rendered locally and nowhere else, with nothing
+    /// anywhere that would try again. That path retries now, but accounts
+    /// already in that state need a way out, and this is it: the local file is
+    /// the evidence a photo was picked, and an empty `avatarURL` the evidence
+    /// it never landed.
+    @MainActor
+    private func retryAvatarUploadIfNeeded(for profile: RemoteProfile) {
+        guard profile.avatarURL?.isEmpty ?? true else { return }
+        let descriptor = FetchDescriptor<Friend>()
+        guard let me = (try? modelContext.fetch(descriptor))?.first(where: { $0.remoteUID == profile.uid }),
+              let fileName = me.avatarPhotoFileName else { return }
+        let localURL = URL.documentsDirectory.appending(path: fileName)
+        guard FileManager.default.fileExists(atPath: localURL.path) else { return }
+
+        Task {
+            // Best-effort and out of the way: the app is already usable, and
+            // the next launch tries again if this one doesn't land.
+            try? await FirestoreService.uploadAvatarPhoto(at: localURL, attempts: 2)
+        }
     }
 }
 

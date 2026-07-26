@@ -141,9 +141,22 @@ final class Friend {
     }
 
     /// On-device location of the picked profile photo, when there is one.
+    ///
+    /// Only ever set for a photo picked *on this device* — someone else's
+    /// photo lives at `avatarRemotePhotoURL`. Anything rendering an avatar has
+    /// to consult both, or a friend's real photo never appears.
     var avatarPhotoURL: URL? {
         guard let avatarPhotoFileName else { return nil }
-        return URL.documentsDirectory.appending(path: avatarPhotoFileName)
+        let url = URL.documentsDirectory.appending(path: avatarPhotoFileName)
+        // A file name that no longer resolves (reinstall, or the app container
+        // moving) would otherwise short-circuit the remote photo and pin the
+        // avatar to the emoji orb for good.
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// The uploaded photo on Storage, synced from this account's profile.
+    var avatarRemotePhotoURL: URL? {
+        avatarURL.isEmpty ? nil : URL(string: avatarURL)
     }
 }
 
@@ -353,6 +366,12 @@ final class Clip {
     /// failed would be silently re-published to friends instead.
     var intendedSpotID: String = ""
 
+    /// The friends this clip was actually addressed to, for the same reason
+    /// `intendedSpotID` is kept here: a send that failed and is retried later
+    /// must reach the same people, not the whole roster. Empty means "everyone
+    /// you're friends with", which is what an unaddressed log has always meant.
+    var intendedRecipientUIDs: [String] = []
+
     /// True once an upload attempt has actually failed, as opposed to not
     /// having happened yet.
     ///
@@ -536,6 +555,20 @@ final class SpotClip {
     /// public posting and have no real account behind them — every screen that
     /// acts on the author (Follow, profile sheet) must tolerate that.
     var authorUID: String = ""
+    /// The author's uploaded profile photo (Storage download URL).
+    ///
+    /// The Places feed shows content from people the viewer has no local
+    /// `Friend` row for, so there is nowhere else to read an avatar from. The
+    /// server has always denormalised this onto a public log (`authorAvatarURL`)
+    /// and `RemotePublicLog` has always decoded it — but there was no field to
+    /// put it in, so every Places card drew the placeholder no matter how many
+    /// of those authors had a real photo. Defaulted, so this is a lightweight
+    /// SwiftData migration.
+    var authorAvatarURL: String = ""
+    /// The author's avatar emoji, for the placeholder. Distinct from `emoji`,
+    /// which is the *clip's* vibe emoji — the orb used to render that, so even
+    /// the fallback wasn't the person's.
+    var authorAvatarEmoji: String = ""
     /// `logs/{id}` on the server, for clips pulled from the public feed. Empty
     /// for clips that only exist locally.
     var remoteID: String = ""

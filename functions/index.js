@@ -1324,6 +1324,23 @@ function cleanHue(raw) {
 }
 
 /**
+ * The uids a friends-only log was addressed to, or null for "everyone".
+ *
+ * Null is the legacy shape and stays meaningful: logs published before this
+ * field existed were genuinely broadcast to the whole friend list, and
+ * `listFriendLogs` keeps showing them that way rather than hiding everyone's
+ * history behind a migration.
+ */
+function cleanRecipientUids(raw) {
+  if (!Array.isArray(raw)) return null;
+  const uids = [...new Set(
+    raw.filter((id) => typeof id === "string" && id.trim() && id.length <= 128)
+      .map((id) => id.trim())
+  )].slice(0, 200);
+  return uids.length ? uids : null;
+}
+
+/**
  * Callable: publishLog({...}) -> { id, capturedAt }
  *
  * Records a captured log so the author's friends can see it. Storage path is
@@ -1379,6 +1396,15 @@ exports.publishLog = onCall(async (request) => {
   // keeps behaving exactly as it did.
   const audience = LOG_AUDIENCES.has(data.audience) ? data.audience : "friends";
 
+  // Who this log was actually sent to. Only meaningful for a friends-only log:
+  // a public post is addressed to the place's feed, not to people. Without
+  // this, picking two friends out of ten in the share screen scoped the send
+  // on the sender's device only — every friend still received it, because the
+  // server had recorded that you posted, never who for.
+  const recipientUids = audience === "friends"
+    ? cleanRecipientUids(data.recipientUids)
+    : null;
+
   // A public log has to say where it was taken — the public feed is organised
   // by place, and an unplaced public post has nowhere to appear.
   let spotId = null;
@@ -1418,6 +1444,7 @@ exports.publishLog = onCall(async (request) => {
     // to without every reader re-deriving it.
     hour: new Date(capturedMs).toISOString().slice(0, 13),
     audience,
+    recipientUids,
     spotId,
     spotName: spot ? spot.name : null,
     authorName: author ? author.name || "" : null,
@@ -1571,6 +1598,19 @@ exports.listFriendLogs = onCall(async (request) => {
   const logs = snaps
     .flatMap((snap) => snap.docs.map((doc) => doc.data()))
     .filter((log) => !blocked.has(log.authorUid))
+    // A log reaches the people it was addressed to, and nobody else. Being
+    // friends with the author is necessary (that's the query above) but not
+    // sufficient — otherwise "send to Maya" is a broadcast to everyone.
+    //
+    // A missing recipient list means "addressed to nobody", not "addressed to
+    // everyone". It used to mean the latter, to avoid hiding logs published
+    // before the field existed — but that grandfather clause *is* the leak
+    // from the reader's side: every pre-scoping log stayed visible to the
+    // author's whole roster, so the send-to-one-person fix looked like it had
+    // never landed. Old logs are no longer shown to friends; the author keeps
+    // seeing their own either way.
+    .filter((log) => log.authorUid === uid
+      || (Array.isArray(log.recipientUids) && log.recipientUids.includes(uid)))
     .map((log) => ({
       id: log.id,
       authorUid: log.authorUid,
@@ -2305,11 +2345,24 @@ exports.getStreamToken = onCall({ secrets: [streamApiSecret] }, async (request) 
 
   const serverClient = StreamChat.getInstance(STREAM_API_KEY, streamApiSecret.value());
 
-  // Quietly create/update the matching Stream user.
+  // Identity comes from the Ralli profile, not the Firebase Auth token.
+  // `auth.token.picture` is only ever populated by a federated provider, so
+  // for an email/password sign-up — which is every account here — it is
+  // empty, and the Stream user was upserted with no image at all. That is why
+  // chat avatars showed initials however many people had uploaded a photo.
+  // The token's `name` is just as unreliable (it's the display name at
+  // sign-up, not the one the profile screen edits).
+  //
+  // This runs on every launch, which is also how a changed photo or name
+  // reaches Stream: profile edits are written to Firestore directly by the
+  // client and nothing else pushes them across.
+  const profileSnap = await db.doc(`users/${auth.uid}`).get();
+  const profile = profileSnap.exists ? profileSnap.data() : {};
+
   await serverClient.upsertUser({
     id: auth.uid,
-    name: auth.token.name || auth.token.email || "Explog user",
-    image: auth.token.picture || undefined,
+    name: profile.name || auth.token.name || auth.token.email || "Explog user",
+    image: profile.avatarURL || auth.token.picture || undefined,
   });
 
   return {

@@ -315,3 +315,56 @@ extension Beacon {
         attendees.filter { !$0.isMe }.map { streamUserId(for: $0) }
     }
 }
+
+// MARK: - Posting into a thread from outside it
+
+/// Sends a message into a chat's real Stream channel without opening the thread.
+///
+/// Reacting to a friend's log in Pulse is supposed to land in the DM as well as
+/// on the clip. That used to be an inserted `Message` row, which only the
+/// local-only `MessageThreadView` renders — so once `StreamConfig.isEnabled`
+/// started correctly reporting a connected Stream user, real accounts rendered
+/// `StreamThreadView` and the reaction reached nobody. This puts it on the same
+/// channel the thread itself opens.
+enum StreamThreadPoster {
+    /// Posts a reaction to `clip` into `chat`'s channel.
+    ///
+    /// Membership is guaranteed server-side first, for the same reason
+    /// `StreamThreadView.makeController` does it: a client can't add itself to
+    /// a channel it isn't already in, and reacting is very often the first
+    /// thing that touches a DM whose channel was created on the other side.
+    @MainActor
+    static func postReaction(_ emoji: String, to clip: Clip, in chat: Chat) async {
+        let client = InjectedValues[\.chatClient]
+        guard client.currentUserId != nil else { return }
+
+        let channelId = chat.streamChannelId
+        do {
+            try await StreamTokenProvider.joinChannel(channelId: channelId,
+                                                      otherMemberIds: chat.streamMemberIds,
+                                                      name: chat.displayName)
+        } catch {
+            chatLog.error("reaction join failed for \(channelId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        let controller = client.channelController(for: ChannelId(type: .messaging, id: channelId))
+        // Text carries the reaction on its own so it reads correctly in the
+        // stock message list (and in a push notification) with no custom
+        // renderer; `extraData` carries the clip identity alongside it, so a
+        // richer bubble can be built on top later without changing the wire
+        // format. Per the SDK, sending needs no prior `synchronize`.
+        controller.createNewMessage(
+            text: "\(emoji) reacted to your log",
+            extraData: [
+                "ralliReactionEmoji": .string(emoji),
+                "ralliClipId": .string(clip.remoteID.isEmpty ? clip.id.uuidString : clip.remoteID),
+                "ralliClipKind": .string(clip.kind.rawValue),
+            ]
+        ) { result in
+            if case .failure(let error) = result {
+                chatLog.error("reaction send failed for \(channelId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+}

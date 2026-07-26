@@ -520,6 +520,33 @@ enum FirestoreService {
         return url
     }
 
+    /// `uploadAvatarPhoto` with a short backoff, for the one caller that runs
+    /// during onboarding.
+    ///
+    /// The upload happens seconds after the account is created, and Storage can
+    /// still be rejecting a token that hasn't finished propagating — the same
+    /// race `AuthGateView.resolveProfile` already retries around. A single
+    /// `try?` there meant one unlucky attempt left the account with no
+    /// `avatarURL` at all, permanently and silently: the photo showed on the
+    /// device that picked it and nowhere else, with nothing to retry it.
+    /// Throws the last error when every attempt is spent, so the caller can
+    /// say so rather than swallowing it.
+    @discardableResult
+    static func uploadAvatarPhoto(at localURL: URL, attempts: Int) async throws -> String {
+        var lastError: Error = CallableFunctions.CallableError(status: "UNKNOWN",
+                                                              message: "Couldn't upload that photo.")
+        for attempt in 0..<max(attempts, 1) {
+            do {
+                return try await uploadAvatarPhoto(at: localURL)
+            } catch {
+                lastError = error
+                guard attempt < attempts - 1 else { break }
+                try? await Task.sleep(for: .milliseconds(400 * (attempt + 1)))
+            }
+        }
+        throw lastError
+    }
+
     /// Soft profile edits the security rules allow the client to write directly.
     ///
     /// `nameLower` is derived here rather than left to callers: it's what name

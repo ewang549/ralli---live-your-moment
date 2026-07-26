@@ -176,7 +176,7 @@ struct AddFriendContent: View {
                     openProfile = hit
                 } label: {
                     HStack(spacing: 13) {
-                        GlassOrbAvatar(emoji: profile.avatarEmoji, hue: 0.58, size: 46, isActive: false)
+                        GlassOrbAvatar(profile: profile, size: 46)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(profile.name)
                                 .font(.system(size: 16, weight: .bold, design: .rounded))

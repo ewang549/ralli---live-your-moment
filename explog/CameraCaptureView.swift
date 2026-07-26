@@ -229,18 +229,17 @@ struct CameraCaptureView: View {
 
     private var maxDuration: TimeInterval { maxVideoDuration.seconds }
 
-    // MARK: Letterbox bands
+    // MARK: Control bands
     //
-    // The screen is a real layout split, not one overlapping stack: the
-    // viewfinder is an aspect-locked 16:9 card, and every control lives in a
-    // band *outside* it. The bands below reserve that space up front, so the
-    // card is sized around the chrome rather than the chrome being floated on
-    // top of a nearly-full-bleed card.
+    // The live image runs edge-to-edge and every control floats on top of it,
+    // the way a real camera app works. The bands below are no longer a layout
+    // split carving space out of the viewfinder — they only group the chrome
+    // into clusters and give the legibility scrims a height to be sized from.
 
-    /// Band above the card, holding the close button and the utility row.
+    /// Cluster on the top edge, holding the close button and the utility row.
     /// Tall enough for a 44pt tap target plus a little air.
     private let topBandHeight: CGFloat = 52
-    /// Band below the card, holding the capture-mode strip.
+    /// Cluster on the bottom edge, holding the capture-mode strip.
     private let bottomBandHeight: CGFloat = 52
     /// Trailing column holding the shutter cluster: the 74pt shutter, the 44pt
     /// flip/flash/gallery stack, and the gap between them.
@@ -280,9 +279,12 @@ struct CameraCaptureView: View {
     var body: some View {
         GeometryReader { screen in
             ZStack {
-                // Warm dark base behind everything (never pure black) —
-                // doubles as the letterbox around the bounded viewfinder card.
+                // Warm dark base behind everything (never pure black) — only
+                // ever visible in the beat before the session delivers frames.
                 Theme.base.ignoresSafeArea()
+
+                // The live image, edge to edge under everything else.
+                viewfinderStage
 
                 // The camera is landscape-only (Ralli video is horizontal), so
                 // this is laid out for landscape and never reflows to portrait.
@@ -295,10 +297,13 @@ struct CameraCaptureView: View {
                 // edge and keeps every band centred on the *screen*.
                 let sideInset = max(safeArea.leading, safeArea.trailing) + 12
 
+                // Chrome floats over the image. Spacers, not opaque bands, hold
+                // the clusters apart, so the whole middle of the frame stays
+                // available to the viewfinder's pinch / swipe / tap gestures.
                 VStack(spacing: 0) {
                     topBand
                     HStack(spacing: 10) {
-                        viewfinderCard
+                        Spacer(minLength: 0)
                         shutterColumn
                     }
                     .frame(maxHeight: .infinity)
@@ -312,10 +317,9 @@ struct CameraCaptureView: View {
                 // empty centre of the top band, between close and the utilities.
                 topReadouts.padding(.top, safeArea.top + 8)
 
-                // The creative strip rises over the letterbox space just above
-                // the mode strip when opened — a transient tray, so unlike the
-                // permanent chrome it may overlap the card's margin. Held clear
-                // of the trailing shutter cluster.
+                // The creative strip rises over the image just above the mode
+                // strip when opened — a transient tray, held clear of the
+                // trailing shutter cluster.
                 if showLooks {
                     VStack {
                         Spacer()
@@ -335,16 +339,19 @@ struct CameraCaptureView: View {
                 // to wait out and the controls should just be there.
                 isLandscapeReady = screen.size.width > screen.size.height
                 safeArea = Self.windowSafeArea()
-                // Covers rotate-to-open, where the interface is already
-                // landscape and no size change will fire below.
-                camera.applyInterfaceRotation()
+                camera.reapplyRotation()
             }
             .onChange(of: screen.size) { _, newSize in
-                // Geometry settling is the one signal that the rotation is
-                // done, so it's also when the window's insets are final — and
-                // when the capture connections need the new angle.
+                // Geometry settling is the one signal that the *interface*
+                // rotation is done, so it's when the window's insets are final.
+                //
+                // It is no longer what drives the capture rotation: a 180°
+                // landscape flip never changes the screen's size, so this never
+                // fired for it, which is exactly how recordings ended up upside
+                // down. The rotation coordinator observes that turn directly
+                // now; this is only a cheap re-push on top.
                 safeArea = Self.windowSafeArea()
-                camera.applyInterfaceRotation()
+                camera.reapplyRotation()
                 let landscape = newSize.width > newSize.height
                 guard landscape != isLandscapeReady else { return }
                 withAnimation(.easeOut(duration: 0.22)) { isLandscapeReady = landscape }
@@ -472,13 +479,29 @@ struct CameraCaptureView: View {
         }
     }
 
-    /// Soft top/bottom (and right, in landscape) darkening so white glass icons
-    /// stay legible over a bright frame, without heavy chrome.
+    /// Top/bottom darkening so the white glass icons and the mode strip stay
+    /// legible over a bright, moving frame, without heavy chrome.
+    ///
+    /// Two short gradients sized to the control clusters rather than one wash
+    /// across the whole screen: with the image running edge to edge there is no
+    /// black margin doing this job any more, but a full-height gradient would
+    /// also grey down the middle of the composition — the part the viewfinder
+    /// exists to show. Each band covers its cluster plus that edge's safe area,
+    /// and fades out just past it.
     private var edgeScrims: some View {
-        LinearGradient(
-            colors: [.black.opacity(0.28), .clear, .clear, .black.opacity(0.32)],
-            startPoint: .top, endPoint: .bottom
-        )
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [.black.opacity(0.45), .black.opacity(0.18), .clear],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: safeArea.top + topBandHeight + 28)
+            Spacer(minLength: 0)
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.2), .black.opacity(0.5)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: safeArea.bottom + bottomBandHeight + 28)
+        }
     }
 
     /// A single-shot pulsing reticle at the last tap location. Animates once and
@@ -506,15 +529,13 @@ struct CameraCaptureView: View {
         }
     }
 
-    /// The viewfinder itself: an aspect-locked 16:9 card carrying the live
-    /// image plus its own scrims, grid and focus reticle, clipped together so
-    /// none of them spill past its edges.
+    /// The viewfinder and everything burned into the frame with it: the scrims,
+    /// the grid, the focus reticle and the hour banner.
     ///
-    /// The ratio is locked to recorded video rather than left to fill whatever
-    /// space the screen happens to have. That is what makes it read as a
-    /// deliberate landscape frame — and it means what you compose in the card
-    /// is what the clip actually contains.
-    private var viewfinderCard: some View {
+    /// Full bleed. No aspect lock, no rounded clip, no rim — the image *is* the
+    /// screen, so there is no card edge left to round and nothing to letterbox
+    /// against. Every control floats on top of this stack instead of beside it.
+    private var viewfinderStage: some View {
         ZStack {
             viewfinderLayer
             edgeScrims.allowsHitTesting(false)
@@ -525,22 +546,13 @@ struct CameraCaptureView: View {
             // hour instead of freezing at whatever hour the camera opened in.
             LiveHourOverlay()
         }
-        // Order matters: the ratio is locked *first*, so the clip and the rim
-        // wrap the 16:9 box itself. Expanding the frame before them drew the
-        // card's outline around the whole leftover region instead, with the
-        // image floating 16:9 inside a much wider ring.
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .strokeBorder(Theme.glassRimTop, lineWidth: 1)
-        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
     }
 
-    /// Letterbox band above the card: close at the screen's top-left corner,
-    /// the utility group (grid, self-timer, looks, duration) on the trailing
-    /// side. Both sit in the margin, not over the live image.
+    /// Top-edge cluster floating over the image: close at the screen's top-left
+    /// corner, the utility group (grid, self-timer, looks, duration) on the
+    /// trailing side.
     private var topBand: some View {
         HStack(alignment: .center) {
             closeButton
@@ -559,7 +571,8 @@ struct CameraCaptureView: View {
         .modifier(ControlsReady(ready: isLandscapeReady))
     }
 
-    /// Letterbox band below the card, holding the capture-mode strip.
+    /// Bottom-edge cluster floating over the image, holding the capture-mode
+    /// strip.
     private var bottomBand: some View {
         modeStrip
             .frame(maxWidth: .infinity)
@@ -567,8 +580,8 @@ struct CameraCaptureView: View {
             .modifier(ControlsReady(ready: isLandscapeReady))
     }
 
-    /// Trailing column beside the card: the flip/flash/gallery circles stacked
-    /// just left of the much larger shutter, vertically centred in the
+    /// Trailing column floating over the image: the flip/flash/gallery circles
+    /// stacked just left of the much larger shutter, vertically centred in the
     /// right-thumb zone so the hierarchy reads at a glance.
     private var shutterColumn: some View {
         HStack(spacing: 6) {
@@ -586,10 +599,8 @@ struct CameraCaptureView: View {
     /// Holds the chrome invisible until the interface has actually finished
     /// rotating to landscape, then fades it in — see `isLandscapeReady`.
     ///
-    /// Applied per band rather than to the whole stack: the bands are part of
-    /// the layout now, so fading the container would take the viewfinder with
-    /// it. Reserving the space either way is also what stops the card resizing
-    /// under the fade.
+    /// Applied per cluster rather than to the whole stack, so the fade only
+    /// ever touches chrome — the live image underneath is never dimmed by it.
     private struct ControlsReady: ViewModifier {
         let ready: Bool
         func body(content: Content) -> some View {
@@ -1455,11 +1466,31 @@ final class CameraModel: NSObject, ObservableObject {
     /// Published so the preview layer picks up the same angle the outputs use.
     @Published private(set) var rotationAngle: CGFloat = 0
 
+    /// Everything that reconfigures or starts/stops the session runs here.
+    ///
+    /// `AVCaptureSession` configuration is not a quick property write: tearing
+    /// the inputs and outputs down and rebuilding them stalls on the capture
+    /// hardware, and Apple is explicit that it must not happen on the main
+    /// thread. It used to — `flip()` called `configure()` straight from the
+    /// button's action — so every camera flip froze the whole UI, shutter
+    /// included, for as long as the pipeline took to come back. One serial
+    /// queue rather than `.global()` so two flips in quick succession can't
+    /// reconfigure the session concurrently.
+    private let sessionQueue = DispatchQueue(label: "com.ej.explog.camera.session")
+
     private let movieOutput = AVCaptureMovieFileOutput()
     private let photoOutput = AVCapturePhotoOutput()
     private var videoCompletion: ((String?) -> Void)?
     private var photoCompletion: ((String?) -> Void)?
+    /// Which camera is live. Written and read on the main thread only (the
+    /// torch, zoom and focus helpers all resolve their device through it); the
+    /// session queue is handed the position it should configure for rather
+    /// than reading this behind the main thread's back.
     private var currentPosition: AVCaptureDevice.Position = .back
+    /// Apple's device-aware source of truth for capture rotation, and the KVO
+    /// tie holding it. Rebuilt per configure, since it belongs to one device.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    private var rotationObservation: NSKeyValueObservation?
     /// Hard cap enforced by AVFoundation itself; set from the launching context.
     private var maxDuration: TimeInterval = CaptureContext.pulse.maxClipDuration
 
@@ -1476,24 +1507,38 @@ final class CameraModel: NSObject, ObservableObject {
     func startIfAvailable(maxDuration: TimeInterval) {
         self.maxDuration = maxDuration
         guard hasCamera, !session.isRunning else { return }
+        let position = currentPosition
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard granted, let self else { return }
-            self.configure()
-            DispatchQueue.global(qos: .userInitiated).async {
+            self.sessionQueue.async {
+                // Re-checked on the queue: two `.task`/`onAppear` passes can
+                // both get past the guard above before either has started.
+                guard !self.session.isRunning else { return }
+                self.configure(position: position, maxDuration: maxDuration)
                 self.session.startRunning()
             }
         }
     }
 
-    private func configure() {
+    /// Rebuilds the session's inputs and outputs for `position`.
+    ///
+    /// Only ever called on `sessionQueue`. The position is a parameter rather
+    /// than a read of `currentPosition` so this can't race the main thread's
+    /// copy of it, and so a flip that lands mid-reconfigure still configures
+    /// for the camera that flip actually asked for.
+    private func configure(position: AVCaptureDevice.Position, maxDuration: TimeInterval) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+
         session.beginConfiguration()
         session.sessionPreset = .high
         session.inputs.forEach { session.removeInput($0) }
 
-        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: currentPosition),
+        var activeDevice: AVCaptureDevice?
+        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
            let input = try? AVCaptureDeviceInput(device: device),
            session.canAddInput(input) {
             session.addInput(input)
+            activeDevice = device
         }
         if let mic = AVCaptureDevice.default(for: .audio),
            let micInput = try? AVCaptureDeviceInput(device: mic),
@@ -1505,49 +1550,81 @@ final class CameraModel: NSObject, ObservableObject {
         movieOutput.maxRecordedDuration = CMTime(seconds: maxDuration, preferredTimescale: 600)
         session.commitConfiguration()
 
-        // Fresh outputs come back with the sensor's native rotation, so the
-        // interface's angle has to be re-pushed after every (re)configure —
-        // including the one behind `flip()`.
-        Task { @MainActor in self.applyInterfaceRotation() }
-
-        // Reset zoom to the device's baseline on (re)configure.
-        zoomFactor = 1
+        // Fresh outputs come back with the sensor's native rotation and
+        // AVFoundation's default mirroring, so both have to be re-asserted
+        // after every (re)configure — including the one behind `flip()`, which
+        // is the call that changes which camera these connections belong to.
+        // The coordinator is per-device, so it is rebuilt here too.
+        // All of it hops to the main actor together: `configure` runs on the
+        // session queue, and the coordinator, its observation and every
+        // `@Published` property below belong to the main actor.
+        let device = activeDevice
+        Task { @MainActor in
+            if let device { self.startTrackingRotation(for: device) }
+            self.reapplyRotation()
+            self.applyMirroring()
+            // Reset zoom to the device's baseline on (re)configure.
+            self.zoomFactor = 1
+        }
     }
 
     // MARK: Orientation
 
-    /// The rotation the capture connections need, in degrees, derived from the
-    /// orientation the interface actually settled on.
+    /// Starts tracking the rotation this device's camera needs, and keeps
+    /// pushing it at the capture connections as the phone turns.
     ///
-    /// `InterfaceOrientationLock.lockLandscape()` applies the `.landscape`
-    /// mask, which permits *both* landscape edges — the system picks whichever
-    /// matches how the phone is held. So this can't be a constant matching "the"
-    /// locked orientation; there isn't one.
+    /// This replaces a hand-written table that mapped the window's
+    /// `UIInterfaceOrientation` to an angle. Two separate things were wrong
+    /// with that, and the first is the "video comes out upside down" bug:
+    ///
+    /// 1. Nothing ever re-read it on a 180° landscape flip. The camera locks
+    ///    the `.landscape` mask, which permits *both* landscape edges, and
+    ///    turning the phone end-for-end between them leaves the screen exactly
+    ///    the same size — so the view's `onChange(of: screen.size)` geometry
+    ///    trigger, the only live signal there was, never fired. Open the camera
+    ///    holding it one way, turn it around, and every frame after that (the
+    ///    preview *and* the recording) was a full 180° off, with nothing to put
+    ///    it right until the screen next changed shape.
+    /// 2. The angles were sensor-relative, and the camera's native sensor
+    ///    orientation is not the same on every iPhone — it changed on the 17
+    ///    Pro. No fixed table can be correct on both sides of that.
+    ///
+    /// `RotationCoordinator` answers both. It reports the angle *this* device's
+    /// camera needs to sit horizon-level with gravity, and it's KVO-observable,
+    /// so a landscape flip delivers a new angle on its own instead of waiting
+    /// on a layout signal that never arrives.
     @MainActor
-    static func interfaceRotationAngle() -> CGFloat {
-        let orientation = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }?
-            .interfaceOrientation
-        switch orientation {
-        case .landscapeRight: return 0
-        case .landscapeLeft: return 180
-        case .portraitUpsideDown: return 270
-        default: return 90  // .portrait, and anything unknown
+    private func startTrackingRotation(for device: AVCaptureDevice) {
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        rotationCoordinator = coordinator
+        // `.initial` so the current angle lands before the first frame, rather
+        // than only once the phone is next moved.
+        rotationObservation = coordinator.observe(
+            \.videoRotationAngleForHorizonLevelCapture, options: [.initial, .new]
+        ) { [weak self] coordinator, _ in
+            let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+            Task { @MainActor [weak self] in self?.apply(rotationAngle: angle) }
         }
     }
 
-    /// Pushes the interface's rotation onto every capture connection.
-    ///
-    /// AVFoundation connections default to the sensor's native orientation and
-    /// never follow a UI-level orientation lock on their own — without this the
-    /// preview and the recorded file both stay portrait-oriented underneath a
-    /// landscape-locked interface, which is exactly the bug this fixes.
+    /// Re-pushes the current angle. Cheap and idempotent, so the view can call
+    /// it whenever it suspects the connections have gone stale — after a
+    /// (re)configure, or once a recording that suppressed a turn has ended.
     @MainActor
-    func applyInterfaceRotation() {
-        let angle = Self.interfaceRotationAngle()
+    func reapplyRotation() {
+        guard let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture else { return }
+        apply(rotationAngle: angle)
+    }
+
+    /// Pushes a rotation onto every capture connection, and mirrors it into
+    /// `rotationAngle` so the preview layer turns with the outputs rather than
+    /// disagreeing with the file it is previewing.
+    @MainActor
+    private func apply(rotationAngle angle: CGFloat) {
         rotationAngle = angle
         // Rotating mid-recording would splice two orientations into one file.
+        // `reapplyRotation()` from the recording-finished delegate is what
+        // catches the connections up afterwards.
         guard !isRecording else { return }
         for output in [movieOutput as AVCaptureOutput, photoOutput] {
             guard let connection = output.connection(with: .video),
@@ -1556,18 +1633,53 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    /// Pins the saved file's mirroring to a known value instead of inheriting
+    /// whatever AVFoundation's default happens to be for this configuration.
+    ///
+    /// Only the *outputs* are pinned. The live preview is deliberately left on
+    /// `AVCaptureVideoPreviewLayer`'s automatic mirroring, which flips the front
+    /// camera — that's the "framing yourself in a mirror" behaviour every camera
+    /// app has, and it's the right feel while filming. The file is the opposite
+    /// case: a mirrored front-camera log leaves any text, logo or asymmetric
+    /// detail in it reading backwards to everyone who watches it. So both
+    /// capture outputs record the true, un-mirrored image, on either camera.
+    @MainActor
+    private func applyMirroring() {
+        for output in [movieOutput as AVCaptureOutput, photoOutput] {
+            guard let connection = output.connection(with: .video),
+                  connection.isVideoMirroringSupported else { continue }
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = false
+        }
+    }
+
     /// Re-caps an already-running session (e.g. capture reopened from Places).
     func updateMaxDuration(_ seconds: TimeInterval) {
         maxDuration = seconds
-        movieOutput.maxRecordedDuration = CMTime(seconds: seconds, preferredTimescale: 600)
+        sessionQueue.async { [movieOutput] in
+            movieOutput.maxRecordedDuration = CMTime(seconds: seconds, preferredTimescale: 600)
+        }
     }
 
+    /// Swaps to the other camera.
+    ///
+    /// Called straight from the flip button, so the only work done here is the
+    /// bookkeeping the main thread owns; the reconfiguration itself — the part
+    /// that stalls on the hardware, and that used to lock up the shutter along
+    /// with everything else — goes to the session queue.
     func flip() {
         currentPosition = currentPosition == .back ? .front : .back
-        configure()
-        // A torch belongs to the device, not the session: re-assert it after the
-        // swap so a lit flash survives flipping to a camera that has one.
-        applyTorch()
+        let position = currentPosition
+        let duration = maxDuration
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.configure(position: position, maxDuration: duration)
+            // A torch belongs to the device, not the session: re-assert it
+            // after the swap so a lit flash survives flipping to a camera that
+            // has one. On the main thread, since it resolves the device
+            // through `currentPosition`.
+            Task { @MainActor in self.applyTorch() }
+        }
     }
 
     /// Advances the flash cycle and pushes the torch state at the hardware
@@ -1652,8 +1764,10 @@ final class CameraModel: NSObject, ObservableObject {
             applyTorch()
         }
         guard session.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.session.stopRunning()
+        // The same queue the configuration runs on, so a stop can't overlap a
+        // reconfigure that's still in flight.
+        sessionQueue.async { [session] in
+            session.stopRunning()
         }
     }
 }
@@ -1667,6 +1781,11 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
             let succeeded = FileManager.default.fileExists(atPath: outputFileURL.path)
             self.videoCompletion?(succeeded ? outputFileURL.lastPathComponent : nil)
             self.videoCompletion = nil
+            // A turn that arrived mid-recording was deliberately not pushed at
+            // the connections (it would have spliced two orientations into one
+            // file). Now that the file is closed, catch them up — otherwise the
+            // *next* clip inherits the angle from before that turn.
+            MainActor.assumeIsolated { self.reapplyRotation() }
         }
     }
 }
@@ -1691,7 +1810,7 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
 
     /// Bakes the capture's rotation into the still's pixel data.
     ///
-    /// `applyInterfaceRotation` sets the same `videoRotationAngle` on the photo
+    /// `apply(rotationAngle:)` sets the same `videoRotationAngle` on the photo
     /// connection as on the movie connection, and video comes out correct — but
     /// `AVCapturePhotoOutput` doesn't honour that angle as reliably as
     /// `AVCaptureMovieFileOutput` does, so the still can come back shaped or
@@ -1758,7 +1877,7 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
     /// Same angle the outputs are given, so the viewfinder can't disagree with
-    /// the file it produces. See `CameraModel.applyInterfaceRotation`.
+    /// the file it produces. See `CameraModel.startTrackingRotation(for:)`.
     var rotationAngle: CGFloat
 
     func makeUIView(context: Context) -> PreviewView {

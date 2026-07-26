@@ -330,7 +330,19 @@ struct MainTabView: View {
         modelContext.insert(clip)
         try? modelContext.save()
 
-        await logSync.publish(clip, context: modelContext)
+        // Addressed to this account's real friends, the same as any send made
+        // through the UI. Publishing it unaddressed made it the one remaining
+        // producer of a friends log with no recipient list — which the server
+        // now shows to nobody, so an unaddressed screenshot post would simply
+        // never appear.
+        let recipients = friends
+            .filter { !$0.isMe && !$0.remoteUID.isEmpty }
+            .map(\.remoteUID)
+        guard !recipients.isEmpty else { return }
+        clip.intendedRecipientUIDs = recipients
+        try? modelContext.save()
+
+        await logSync.publish(clip, context: modelContext, recipientUids: recipients)
     }
 #endif
 

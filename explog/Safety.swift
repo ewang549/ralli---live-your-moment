@@ -551,7 +551,7 @@ struct BlockedAccountsView: View {
             VStack(spacing: 10) {
                 ForEach(friendGraph.blocked) { profile in
                     HStack(spacing: 12) {
-                        GlassOrbAvatar(emoji: profile.avatarEmoji, hue: 0.58, size: 44, isActive: false)
+                        GlassOrbAvatar(profile: profile, size: 44)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(profile.name)
                                 .font(.subheadline.weight(.semibold))
