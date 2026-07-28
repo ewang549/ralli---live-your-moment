@@ -290,7 +290,11 @@ struct WelcomeView: View {
     }
 
     private var canSubmit: Bool {
-        !email.isEmpty && password.count >= 6 && (mode == .logIn || !name.isEmpty)
+        // Trimmed, to match what `submit` actually sends — an all-whitespace
+        // field would otherwise light the button up for a guaranteed failure.
+        !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && password.count >= 6
+            && (mode == .logIn || !name.isEmpty)
     }
 
     private func authField(_ placeholder: String, text: Binding<String>) -> some View {
@@ -305,6 +309,13 @@ struct WelcomeView: View {
         guard !busy else { return }
         busy = true
         errorMessage = nil
+        // Whitespace never belongs in an email, and iOS supplies it freely:
+        // QuickType and password autofill both like to append a space, and it
+        // survives into the field invisibly. Firebase then rejects the address
+        // as a credential mismatch, which presents to the person typing as
+        // "my correct password stopped working". Trim on the way out rather
+        // than while editing, so the cursor doesn't jump mid-type.
+        let email = self.email.trimmingCharacters(in: .whitespacesAndNewlines)
         Task { @MainActor in
             do {
                 let firebaseUser: FirebaseAuth.User
@@ -322,9 +333,54 @@ struct WelcomeView: View {
                 // creates the matching Stream user. The user only sees chat work.
                 try await connectStream(as: firebaseUser)
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = Self.message(for: error)
                 busy = false
             }
+        }
+    }
+
+    /// Turns a Firebase Auth error into something a person can act on.
+    ///
+    /// This used to be a bare `error.localizedDescription`, which is the SDK's
+    /// own wording — accurate but written for a developer reading a console.
+    /// The expiry codes are the worst of them: they say a token is invalid,
+    /// which reads like the account is broken when the fix is just "sign in
+    /// again". Getting these apart also matters for support — someone truly
+    /// locked out (disabled, wrong password) needs a different answer from
+    /// someone whose token lapsed and who only has to resubmit.
+    ///
+    /// Anything unrecognised keeps `localizedDescription`: a vague message is
+    /// worse than the SDK's, which at least names the real problem.
+    private static func message(for error: Error) -> String {
+        guard let code = AuthErrorCode(rawValue: (error as NSError).code) else {
+            return error.localizedDescription
+        }
+        switch code {
+        // The session lapsed or was revoked server-side. Nothing is wrong with
+        // the credentials; the stored token just isn't usable any more.
+        case .userTokenExpired, .invalidUserToken, .requiresRecentLogin, .sessionExpired:
+            return "Your session expired. Please sign in again."
+        // Firebase collapses wrong-password into `invalidCredential` when email
+        // enumeration protection is on, so these can't be told apart and must
+        // share one message that doesn't confirm whether the email exists.
+        case .invalidCredential, .wrongPassword, .userNotFound:
+            return "That email and password don't match. Check both and try again."
+        case .invalidEmail:
+            return "That doesn't look like a valid email address."
+        case .userDisabled:
+            return "This account has been disabled. Contact support if that's unexpected."
+        case .emailAlreadyInUse:
+            return "An account already exists for that email. Try logging in instead."
+        case .weakPassword:
+            return "Pick a longer password — at least 6 characters."
+        case .networkError:
+            return "Couldn't reach the network. Check your connection and try again."
+        case .tooManyRequests:
+            return "Too many attempts. Wait a moment and try again."
+        case .operationNotAllowed:
+            return "Email sign-in isn't enabled for this app right now."
+        default:
+            return error.localizedDescription
         }
     }
 
