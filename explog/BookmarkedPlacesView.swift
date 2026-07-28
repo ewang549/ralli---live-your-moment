@@ -55,8 +55,11 @@ struct BookmarkedPlacesView: View {
                 // never re-watched. The bookmark button sits above it in the
                 // ZStack and keeps its own tap target.
                 Button { open(clip) } label: {
-                    ClipMediaView(spotClip: clip, isActive: false)
-                        .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                    // The clip's own shape, fitted — a fixed 9:16 portrait card
+                    // cropped the landscape captures these actually are.
+                    ClipMediaView(spotClip: clip, isActive: false, contentMode: .fit)
+                        .aspectRatio(clip.displayAspectRatio, contentMode: .fit)
+                        .background(Color.black)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }

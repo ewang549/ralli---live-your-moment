@@ -335,6 +335,9 @@ struct WelcomeView: View {
         if chatClient.currentUserId != nil {
             await chatClient.logout()
         }
+        // Membership cached for the previous session (dev token or another
+        // account) says nothing about this user.
+        StreamTokenProvider.resetJoinedChannels()
         let credentials = try await StreamTokenProvider.fetchToken(for: firebaseUser)
         try await chatClient.connectUser(
             userInfo: .init(id: credentials.userId,

@@ -6,6 +6,18 @@ import FirebaseAuth
 import FirebaseMessaging
 import StreamChat
 import StreamChatSwiftUI
+import os
+
+/// Matches `PushNotifications.swift`'s logger, so APNs registration and the FCM
+/// token save that follows it read as one story under `category: push` rather
+/// than the failure landing somewhere the other half of the flow isn't.
+private let pushLog = Logger(subsystem: "com.ej.explog", category: "push")
+
+/// Interface-orientation policy changes and the geometry updates that carry
+/// them out. A declined rotation is otherwise completely silent — it looks
+/// exactly like "nothing happened" from the outside — so this is the only
+/// signal there is when the system refuses to turn the interface.
+private let orientationLog = Logger(subsystem: "com.ej.explog", category: "orientation")
 
 /// Runtime-switchable interface-orientation policy.
 ///
@@ -20,13 +32,45 @@ enum InterfaceOrientationLock {
     /// app delegate; mutated only through `lockLandscape()` / `lockPortrait()`.
     static var mask: UIInterfaceOrientationMask = .portrait
 
-    /// Force the interface into landscape and hold it there. The system rotates
-    /// to whichever landscape edge matches how the phone is being held.
-    @MainActor static func lockLandscape() { apply(.landscape) }
+    /// Force the interface into landscape and hold it there, on the single edge
+    /// that matches how the phone is physically being held.
+    ///
+    /// Deliberately *one* orientation rather than `.landscape`, which is both
+    /// edges at once. With the phone's rotation lock engaged, the system only
+    /// reliably overrides the lock for an app that permits exactly one
+    /// orientation — there is nothing left to choose. Permit both and choosing
+    /// between them needs the same automatic-rotation machinery Control Centre's
+    /// lock disables, so the geometry request below can simply be declined and
+    /// the camera comes up running but stuck in portrait.
+    ///
+    /// Reading the edge from the *device* keeps the rotation-lock-off case right
+    /// too: a hard-coded edge would show the UI upside down for anyone who turns
+    /// the phone the other way.
+    @MainActor static func lockLandscape() { apply(landscapeMask()) }
 
     /// Return to the app's default portrait and rotate upright, whatever posture
     /// the phone is in — this is what "restores portrait" on camera exit.
     @MainActor static func lockPortrait() { apply(.portrait) }
+
+    /// The one landscape edge matching the phone's current posture.
+    ///
+    /// `UIDeviceOrientation` and `UIInterfaceOrientation` name their landscapes
+    /// from opposite ends — a device held `.landscapeLeft` puts the interface in
+    /// `.landscapeRight` — so the two cases cross over here.
+    ///
+    /// Anything that isn't a landscape (`.portrait`, `.faceUp` on a table,
+    /// `.unknown` before the sensor has reported) falls back to `.landscapeRight`
+    /// rather than to a both-edge mask, since an ambiguous mask is the thing
+    /// this whole function exists to avoid. The camera's controls reflow by
+    /// orientation, not by edge, so either edge is equally right when the phone
+    /// isn't telling us which one it's on.
+    @MainActor private static func landscapeMask() -> UIInterfaceOrientationMask {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft: .landscapeRight
+        case .landscapeRight: .landscapeLeft
+        default: .landscapeRight
+        }
+    }
 
     @MainActor private static func apply(_ newMask: UIInterfaceOrientationMask) {
         // Update the reported mask FIRST so that when the system re-queries
@@ -35,7 +79,13 @@ enum InterfaceOrientationLock {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }) else { return }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: newMask)) { _ in }
+        // The handler only runs on failure. Swallowing it was how the declined
+        // rotation under a hardware rotation lock stayed invisible for so long.
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: newMask)) { error in
+            orientationLog.error(
+                "requestGeometryUpdate(mask: \(newMask.rawValue, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
         // Nudge the system to re-read `supportedInterfaceOrientationsFor`, so it
         // doesn't immediately snap the interface back toward the old mask.
         //
@@ -83,6 +133,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         let chatClient = ChatClient(config: config)
         streamChat = StreamChat(chatClient: chatClient)
 
+        // Ralli's own message kinds — currently a shared place — have to be
+        // declared before the first message list is built, or the SDK draws
+        // them as the plain text they fall back to.
+        //
+        // Strictly after `StreamChat(chatClient:)`: assigning through this key
+        // path reads it first, and the getter asserts if the SDK hasn't been
+        // initialised yet. Setting it a line earlier is a launch crash.
+        InjectedValues[\.utils] = Utils(messageTypeResolver: RalliMessageTypeResolver())
+
         connectStreamUser(chatClient)
 
         // Delegates only — the permission prompt is deliberately deferred to
@@ -104,7 +163,12 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication,
                      didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        print("APNs registration failed: \(error)")
+        // Logged rather than printed: this is the one signal that push is dead
+        // on this device, and it has to be findable in a device log filtered by
+        // subsystem. A bare `print` only reaches an attached Xcode console,
+        // which is exactly the situation you aren't in when a real build on a
+        // real phone silently never receives anything.
+        pushLog.error("APNs registration failed: \(error.localizedDescription, privacy: .public)")
     }
 
     /// Firebase-signed-in users get a backend-minted token (Stream user is

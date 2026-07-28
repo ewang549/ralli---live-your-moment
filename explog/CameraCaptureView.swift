@@ -48,17 +48,16 @@ enum VideoDuration {
 }
 
 /// What the shutter does. Photo taps a still and holds for video (the unified
-/// Snapchat gesture); Video makes a single tap toggle recording; Boomerang fires
-/// a short looping burst. Modes never override the `CaptureContext` cap.
+/// Snapchat gesture); Video makes a single tap toggle recording. Modes never
+/// override the `CaptureContext` cap.
 enum CaptureMode: String, CaseIterable, Identifiable {
-    case boomerang, photo, video
+    case photo, video
 
     var id: String { rawValue }
 
     /// Face on the mode strip, sentence-cased.
     var title: String {
         switch self {
-        case .boomerang: "Boomerang"
         case .photo: "Photo"
         case .video: "Video"
         }
@@ -246,13 +245,24 @@ struct CameraCaptureView: View {
     private let shutterColumnWidth: CGFloat = 128
 
     /// Orientation state machine, state 0: the interface has actually finished
-    /// rotating to landscape. `.task` below *requests* the rotation, but the
-    /// system's own animation takes a beat — revealing landscape-laid-out
-    /// controls before that beat completes is what caused the flicker (icons
-    /// appearing over a still-portrait frame). Driven off real layout geometry
-    /// (below) rather than a fixed delay, since that's the one signal that
-    /// actually tracks when the rotation animation is done.
+    /// rotating to landscape, *animation included*. `.task` below only
+    /// *requests* the rotation; revealing landscape-laid-out controls before the
+    /// system has finished playing it is what caused the flicker (icons
+    /// appearing over a still-portrait frame).
+    ///
+    /// This used to be driven off `GeometryReader` size changes, on the theory
+    /// that geometry settling tracks the end of the rotation. It doesn't: the
+    /// interface's *logical* bounds flip near the start of the transition, so
+    /// the fade ran concurrently with the system's own rotation animation —
+    /// two animations stacked in one window, which is what read as choppy. The
+    /// reveal is now gated on `RotationSettleReporter` below, which reports from
+    /// the rotation's own transition coordinator.
     @State private var isLandscapeReady = false
+
+    /// Whether the interface's *layout* is landscape. Flips as soon as the
+    /// geometry does — early in the transition — which is why it's separate
+    /// from `isLandscapeReady`, the visibility gate.
+    @State private var isLandscapeLayout = false
 
     /// The window's real safe-area insets.
     ///
@@ -274,6 +284,18 @@ struct CameraCaptureView: View {
             .safeAreaInsets ?? .zero
         return EdgeInsets(top: insets.top, leading: insets.left,
                           bottom: insets.bottom, trailing: insets.right)
+    }
+
+    /// Fade the chrome in, now that the interface has genuinely finished
+    /// rotating. Idempotent: the coordinator callback and the backstop timer
+    /// both land here, and whichever arrives second does nothing.
+    private func revealControls() {
+        guard isLandscapeLayout, !isLandscapeReady else { return }
+        // Insets are only final once the rotation is over, so re-read them
+        // here rather than trusting the pair taken mid-transition.
+        safeArea = Self.windowSafeArea()
+        camera.reapplyRotation()
+        withAnimation(.easeOut(duration: 0.22)) { isLandscapeReady = true }
     }
 
     var body: some View {
@@ -303,12 +325,20 @@ struct CameraCaptureView: View {
                 VStack(spacing: 0) {
                     topBand
                     HStack(spacing: 10) {
+                        // Leading edge, opposite the shutter cluster: the
+                        // sliders need real width, which the narrow trailing
+                        // column next to the shutter doesn't have, and putting
+                        // them on the far side keeps them clear of the thumb
+                        // that is about to press record.
+                        screenFlashControls
+                            .modifier(ControlsReady(ready: isLandscapeReady))
                         Spacer(minLength: 0)
                         shutterColumn
                     }
                     .frame(maxHeight: .infinity)
                     bottomBand
                 }
+                .animation(.easeOut(duration: 0.2), value: camera.isScreenFlashActive)
                 .padding(.horizontal, sideInset)
                 .padding(.top, safeArea.top + 8)
                 .padding(.bottom, safeArea.bottom + 10)
@@ -331,13 +361,21 @@ struct CameraCaptureView: View {
 
                 // Big self-timer countdown, above everything.
                 countdownOverlay.allowsHitTesting(false)
+
+                // Zero-sized, invisible: it exists only to hear the interface
+                // rotation's transition coordinator finish. UIKit forwards size
+                // transitions to child controllers regardless of their frame.
+                RotationSettleReporter { revealControls() }
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
             }
             .ignoresSafeArea()
             .onAppear {
                 // No animation on first read: if the phone was already
                 // physically landscape (rotate-to-open), there's no rotation
                 // to wait out and the controls should just be there.
-                isLandscapeReady = screen.size.width > screen.size.height
+                isLandscapeLayout = screen.size.width > screen.size.height
+                isLandscapeReady = isLandscapeLayout
                 safeArea = Self.windowSafeArea()
                 camera.reapplyRotation()
             }
@@ -353,8 +391,28 @@ struct CameraCaptureView: View {
                 safeArea = Self.windowSafeArea()
                 camera.reapplyRotation()
                 let landscape = newSize.width > newSize.height
-                guard landscape != isLandscapeReady else { return }
-                withAnimation(.easeOut(duration: 0.22)) { isLandscapeReady = landscape }
+                guard landscape != isLandscapeLayout else { return }
+                isLandscapeLayout = landscape
+
+                if !landscape {
+                    // Leaving landscape: drop the chrome at once and *without*
+                    // a fade. Same reasoning as the reveal — nothing of ours
+                    // animates while the system spins the interface — but here
+                    // there's nothing to wait for, since holding the controls
+                    // on screen through the turn is the artefact, not the fix.
+                    isLandscapeReady = false
+                    return
+                }
+
+                // Entering landscape: the reveal waits for the transition
+                // coordinator (`revealControls`). This is only a backstop, in
+                // case a geometry flip ever arrives without a transition to
+                // report — otherwise the chrome would stay hidden for good.
+                // It's a no-op once the coordinator has already fired.
+                Task {
+                    try? await Task.sleep(for: .milliseconds(450))
+                    revealControls()
+                }
             }
         }
         // Seed the duration from the launching context, push its cap into the
@@ -437,13 +495,25 @@ struct CameraCaptureView: View {
         GeometryReader { geo in
             Group {
                 if camera.hasCamera {
-                    CameraPreview(session: camera.session, rotationAngle: camera.rotationAngle)
+                    CameraPreview(
+                        session: camera.session,
+                        rotationAngle: camera.rotationAngle,
+                        isFrontCamera: camera.isFrontCamera
+                    )
                 } else {
                     TimeOfDayCard()
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .modifier(LookGrade(look: look))
+            // Above the grade, not under it: this is light being thrown at the
+            // subject, not part of the image being graded.
+            .overlay {
+                if camera.isScreenFlashActive {
+                    ScreenFlashOverlay(brightness: camera.screenFlashBrightness,
+                                       thickness: camera.screenFlashThickness)
+                }
+            }
             .clipped()
             .contentShape(Rectangle())
             .gesture(
@@ -468,7 +538,28 @@ struct CameraCaptureView: View {
                         cycleLook(forward: value.translation.width < 0)
                     }
             )
-            .onTapGesture { location in focus(at: location, in: geo.size) }
+            // Double-tap flips the camera; a single tap still focuses.
+            //
+            // `ExclusiveGesture` rather than two `.onTapGesture` modifiers,
+            // because the two readings of a tap here genuinely conflict and
+            // something has to arbitrate: the first tap of a flip is
+            // indistinguishable from a focus tap until the second either
+            // arrives or doesn't. Exclusivity resolves that the only way it
+            // can — the double-tap is offered first, and focus runs only once
+            // that has failed. The cost is that a single tap now waits out the
+            // double-tap window before the reticle drops, which is the price of
+            // never firing a stray focus at the point you flipped from.
+            .gesture(
+                ExclusiveGesture(
+                    SpatialTapGesture(count: 2)
+                        .onEnded { _ in
+                            Haptics.tap()
+                            camera.flip()
+                        },
+                    SpatialTapGesture(count: 1)
+                        .onEnded { value in focus(at: value.location, in: geo.size) }
+                )
+            )
         }
     }
 
@@ -713,6 +804,22 @@ struct CameraCaptureView: View {
         .accessibilityValue(camera.flashMode.label)
     }
 
+    /// The screen-flash sliders, shown only while the screen flash is the thing
+    /// the flash button is actually controlling — i.e. on the front camera,
+    /// with flash armed. On the back camera the button drives a real torch and
+    /// there is nothing here to tune.
+    @ViewBuilder
+    private var screenFlashControls: some View {
+        if camera.isScreenFlashActive {
+            ScreenFlashControls(
+                brightness: Binding(get: { camera.screenFlashBrightness },
+                                    set: { camera.screenFlashBrightness = $0 }),
+                thickness: Binding(get: { camera.screenFlashThickness },
+                                   set: { camera.screenFlashThickness = $0 })
+            )
+        }
+    }
+
     /// Gallery / last-capture thumbnail → opens the system photo picker to pull
     /// an existing shot into the send flow. A clean standalone glass circle, the
     /// same treatment as the flip/flash buttons above it, so the right cluster
@@ -867,8 +974,8 @@ struct CameraCaptureView: View {
     // MARK: - Capture mode strip
 
     /// TikTok/Snap-style mode selector. The active mode is a coral pill; a tap
-    /// (or the underlying swipe on the preview) moves between Photo, Video, and
-    /// Boomerang. Sits just under the shutter row.
+    /// (or the underlying swipe on the preview) moves between Photo and Video.
+    /// Sits just under the shutter row.
     private var modeStrip: some View {
         HStack(spacing: 6) {
             ForEach(CaptureMode.allCases) { mode in
@@ -925,7 +1032,7 @@ struct CameraCaptureView: View {
     }
 
     /// Begin recording. From a press-and-hold (Photo mode) it fires immediately;
-    /// from a mode tap (Video/Boomerang) it runs any armed self-timer first. The
+    /// from a mode tap (Video) it runs any armed self-timer first. The
     /// hardware cap auto-stops at `maxVideoDuration`; releasing early keeps the clip.
     private func startVideo() {
         guard countdown == nil else { return }
@@ -1062,6 +1169,49 @@ private extension CGPoint {
     var debugID: String { "\(Int(x))-\(Int(y))" }
 }
 
+// MARK: - Rotation settling
+
+/// Reports when the system's *interface rotation animation* has actually
+/// finished playing — not merely when the new bounds were published.
+///
+/// SwiftUI has no signal for this. `GeometryReader` hands over the new size
+/// near the *start* of the transition, so anything animated off it runs on top
+/// of the system's own rotation animation instead of after it. UIKit does have
+/// the signal: every size transition carries a transition coordinator whose
+/// completion block fires when the rotation has finished on screen. A
+/// zero-sized child controller is enough to hear it, since `UIViewController`
+/// forwards `viewWillTransition(to:with:)` down to its children.
+private struct RotationSettleReporter: UIViewControllerRepresentable {
+    /// Called on the main actor once a rotation has fully finished.
+    let onSettled: () -> Void
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.onSettled = onSettled
+        controller.view.isUserInteractionEnabled = false
+        controller.view.backgroundColor = .clear
+        return controller
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.onSettled = onSettled
+    }
+
+    final class Controller: UIViewController {
+        var onSettled: (() -> Void)?
+
+        override func viewWillTransition(to size: CGSize,
+                                         with coordinator: UIViewControllerTransitionCoordinator) {
+            super.viewWillTransition(to: size, with: coordinator)
+            // `alongsideTransition: nil` — nothing of ours should animate
+            // *with* the rotation; the whole point is to wait it out.
+            coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                self?.onSettled?()
+            }
+        }
+    }
+}
+
 // MARK: - Shutter button (Snapchat-style ring + progress)
 
 /// A clean white ring with a coral-tinted inner fill. Tap fires a photo;
@@ -1121,8 +1271,8 @@ private struct ShutterButton: View {
                     if !isPressed {
                         isPressed = true
                         pressStartY = value.startLocation.y
-                        // Only Photo mode arms hold-to-record; Video/Boomerang
-                        // are tap-to-toggle, so a hold there is just a long tap.
+                        // Only Photo mode arms hold-to-record; Video is
+                        // tap-to-toggle, so a hold there is just a long tap.
                         if mode == .photo { scheduleHold() }
                     }
                     if didStartVideo {
@@ -1142,7 +1292,7 @@ private struct ShutterButton: View {
                         switch mode {
                         case .photo:
                             onPhoto()
-                        case .video, .boomerang:
+                        case .video:
                             // Single tap toggles recording.
                             if isRecording { onVideoStop() } else { onVideoStart() }
                         }
@@ -1465,6 +1615,36 @@ final class CameraModel: NSObject, ObservableObject {
     /// Rotation currently pushed onto the capture connections, in degrees.
     /// Published so the preview layer picks up the same angle the outputs use.
     @Published private(set) var rotationAngle: CGFloat = 0
+    /// Whether the *live* session is on the front camera. Published separately
+    /// from `currentPosition` because it is set from the far side of a
+    /// (re)configure: `flip()` moves `currentPosition` immediately, but the
+    /// preview's connection doesn't belong to the new camera until the session
+    /// queue has committed, and mirroring pushed before then would land on the
+    /// outgoing connection and be lost with it.
+    @Published private(set) var isFrontCamera = false
+
+    /// How bright the front-camera screen flash glows, 0…1.
+    ///
+    /// The front camera has no torch — `applyTorch()` guards on
+    /// `device.hasTorch`, which is false there, and the front photo output
+    /// doesn't support a flash mode either. So arming flash on the front camera
+    /// used to do nothing at all. The screen itself is the only light source
+    /// available, and this is how much of it to use.
+    ///
+    /// Drives the overlay's opacity rather than `UIScreen.main.brightness`:
+    /// opacity is local to this screen and undoes itself when the view goes
+    /// away, where turning the device's brightness up has to be remembered and
+    /// restored on every exit path — including a crash or a backgrounding.
+    @Published var screenFlashBrightness: Double = 0.75
+
+    /// How thick the glowing ring is, 0…1 of the shorter screen edge. At 1 the
+    /// ring closes up into a full-screen wash.
+    @Published var screenFlashThickness: Double = 0.25
+
+    /// Whether the screen flash should be showing: front camera, flash armed.
+    /// `.auto` counts as armed here — there is no metering to defer to on a
+    /// light source the user is aiming themselves.
+    var isScreenFlashActive: Bool { isFrontCamera && flashMode != .off }
 
     /// Everything that reconfigures or starts/stops the session runs here.
     ///
@@ -1478,9 +1658,18 @@ final class CameraModel: NSObject, ObservableObject {
     /// reconfigure the session concurrently.
     private let sessionQueue = DispatchQueue(label: "com.ej.explog.camera.session")
 
-    private let movieOutput = AVCaptureMovieFileOutput()
+    /// Video and audio arrive as raw sample buffers and are written by
+    /// `ClipRecorder`, not by an `AVCaptureMovieFileOutput`. That output cannot
+    /// survive `configure()` removing the session's inputs to swap cameras — it
+    /// finalizes the file the moment its connection goes away — so recording
+    /// through it made a mid-take flip truncate the clip. See `ClipRecorder`.
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let audioOutput = AVCaptureAudioDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
-    private var videoCompletion: ((String?) -> Void)?
+    /// Owns the queue both capture outputs deliver on — one serial queue for
+    /// both, so video and audio buffers stay ordered against each other and
+    /// against start/stop.
+    private let recorder = ClipRecorder()
     private var photoCompletion: ((String?) -> Void)?
     /// Which camera is live. Written and read on the main thread only (the
     /// torch, zoom and focus helpers all resolve their device through it); the
@@ -1514,7 +1703,10 @@ final class CameraModel: NSObject, ObservableObject {
                 // Re-checked on the queue: two `.task`/`onAppear` passes can
                 // both get past the guard above before either has started.
                 guard !self.session.isRunning else { return }
-                self.configure(position: position, maxDuration: maxDuration)
+                // No take can be in flight before the session has started, so
+                // there is no angle to lock — the coordinator pushes the live
+                // one as soon as it's tracking.
+                self.configure(position: position, lockedAngle: nil)
                 self.session.startRunning()
             }
         }
@@ -1526,11 +1718,21 @@ final class CameraModel: NSObject, ObservableObject {
     /// than a read of `currentPosition` so this can't race the main thread's
     /// copy of it, and so a flip that lands mid-reconfigure still configures
     /// for the camera that flip actually asked for.
-    private func configure(position: AVCaptureDevice.Position, maxDuration: TimeInterval) {
+    ///
+    /// `lockedAngle` is non-nil only when a take is in flight: mid-recording,
+    /// the new camera's connection has to come up at the angle the take
+    /// started at rather than at the live one. See the call site in `flip()`.
+    private func configure(position: AVCaptureDevice.Position, lockedAngle: CGFloat?) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
 
         session.beginConfiguration()
-        session.sessionPreset = .high
+        // Pinned rather than `.high`, which is free to resolve differently on
+        // the front and back cameras. Recording writes into a file whose frame
+        // size is fixed at its first frame, so a flip that changed the buffer
+        // size mid-take would leave the rest of the clip being rescaled. Both
+        // cameras on every supported device do 1080p; `.high` is the fallback
+        // if some future one doesn't.
+        session.sessionPreset = session.canSetSessionPreset(.hd1920x1080) ? .hd1920x1080 : .high
         session.inputs.forEach { session.removeInput($0) }
 
         var activeDevice: AVCaptureDevice?
@@ -1545,24 +1747,57 @@ final class CameraModel: NSObject, ObservableObject {
            session.canAddInput(micInput) {
             session.addInput(micInput)
         }
-        if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+        // `canAddOutput` is false for an output already on the session, so
+        // these are no-ops on every configure after the first — which is the
+        // point: the outputs, and any recording writing from them, live right
+        // through a camera swap.
+        // The delegates are set at add time, so only on the first configure.
+        // Re-setting one on a running session interrupts delivery, which
+        // mid-take would punch a hole in the file the flip is meant to survive.
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+            videoOutput.setSampleBufferDelegate(self, queue: recorder.queue)
+        }
+        if session.canAddOutput(audioOutput) {
+            session.addOutput(audioOutput)
+            audioOutput.setSampleBufferDelegate(self, queue: recorder.queue)
+        }
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
-        movieOutput.maxRecordedDuration = CMTime(seconds: maxDuration, preferredTimescale: 600)
+
+        // Geometry is pinned inside the configuration block, before the first
+        // buffer from the new camera can arrive. Deferring it to the main-actor
+        // hop below would let a few frames through at the sensor's default
+        // rotation — and mid-flip that means frames of the wrong shape landing
+        // in an already-open file.
+        if let lockedAngle { pushRotation(lockedAngle) }
+        pinOutputMirroring()
         session.commitConfiguration()
 
-        // Fresh outputs come back with the sensor's native rotation and
-        // AVFoundation's default mirroring, so both have to be re-asserted
-        // after every (re)configure — including the one behind `flip()`, which
-        // is the call that changes which camera these connections belong to.
-        // The coordinator is per-device, so it is rebuilt here too.
-        // All of it hops to the main actor together: `configure` runs on the
-        // session queue, and the coordinator, its observation and every
-        // `@Published` property below belong to the main actor.
+        // The rotation coordinator is per-device, so it's rebuilt here on every
+        // (re)configure — including the one behind `flip()`, which is the call
+        // that changes which camera these connections belong to. This hops to
+        // the main actor: the coordinator, its observation and every
+        // `@Published` property below belong there.
         let device = activeDevice
         Task { @MainActor in
             if let device { self.startTrackingRotation(for: device) }
-            self.reapplyRotation()
-            self.applyMirroring()
+            // Published from the position that was actually configured, so the
+            // preview mirrors the camera that is live rather than the one a
+            // flip has already optimistically recorded on the main thread.
+            self.isFrontCamera = position == .front
+            // A take in flight keeps the angle it started at — catching the
+            // connections up on the live one would splice two orientations into
+            // the open file. `recordClip`'s completion is what catches them up
+            // once the file is closed. Re-pushed rather than skipped: whether a
+            // swapped connection is reachable from inside the configuration
+            // block isn't guaranteed, and pushing the same angle twice costs
+            // nothing.
+            if let lockedAngle {
+                self.pushRotation(lockedAngle)
+            } else {
+                self.reapplyRotation()
+            }
+            self.pinOutputMirroring()
             // Reset zoom to the device's baseline on (re)configure.
             self.zoomFactor = 1
         }
@@ -1622,11 +1857,21 @@ final class CameraModel: NSObject, ObservableObject {
     @MainActor
     private func apply(rotationAngle angle: CGFloat) {
         rotationAngle = angle
-        // Rotating mid-recording would splice two orientations into one file.
-        // `reapplyRotation()` from the recording-finished delegate is what
-        // catches the connections up afterwards.
+        // Rotating mid-recording would splice two orientations — and, since the
+        // buffers themselves come out rotated, two frame shapes — into one
+        // file. `recordClip`'s completion catches the connections up once the
+        // file is closed.
         guard !isRecording else { return }
-        for output in [movieOutput as AVCaptureOutput, photoOutput] {
+        pushRotation(angle)
+    }
+
+    /// Writes an angle straight onto the capture connections.
+    ///
+    /// Deliberately not main-actor-bound: `configure()` calls it from the
+    /// session queue inside its configuration block, which is where a freshly
+    /// swapped connection has to be set up before it delivers anything.
+    private func pushRotation(_ angle: CGFloat) {
+        for output in [videoOutput as AVCaptureOutput, photoOutput] {
             guard let connection = output.connection(with: .video),
                   connection.isVideoRotationAngleSupported(angle) else { continue }
             connection.videoRotationAngle = angle
@@ -1636,16 +1881,21 @@ final class CameraModel: NSObject, ObservableObject {
     /// Pins the saved file's mirroring to a known value instead of inheriting
     /// whatever AVFoundation's default happens to be for this configuration.
     ///
-    /// Only the *outputs* are pinned. The live preview is deliberately left on
-    /// `AVCaptureVideoPreviewLayer`'s automatic mirroring, which flips the front
-    /// camera — that's the "framing yourself in a mirror" behaviour every camera
-    /// app has, and it's the right feel while filming. The file is the opposite
-    /// case: a mirrored front-camera log leaves any text, logo or asymmetric
-    /// detail in it reading backwards to everyone who watches it. So both
-    /// capture outputs record the true, un-mirrored image, on either camera.
-    @MainActor
-    private func applyMirroring() {
-        for output in [movieOutput as AVCaptureOutput, photoOutput] {
+    /// Only the *outputs* are pinned here. The live preview stays mirrored on
+    /// the front camera — that's the "framing yourself in a mirror" behaviour
+    /// every camera app has, and it's the right feel while filming — but it is
+    /// pinned to that explicitly too, in `CameraPreview.PreviewView`, rather
+    /// than inherited from `AVCaptureVideoPreviewLayer`'s automatic mirroring.
+    /// The file is the opposite case: a mirrored front-camera log leaves any
+    /// text, logo or asymmetric detail in it reading backwards to everyone who
+    /// watches it. So both capture outputs record the true, un-mirrored image,
+    /// on either camera.
+    ///
+    /// Called from `configure()` on the session queue, alongside `pushRotation`
+    /// and for the same reason: a swapped connection must be pinned before it
+    /// starts delivering, not a main-actor hop later.
+    private func pinOutputMirroring() {
+        for output in [videoOutput as AVCaptureOutput, photoOutput] {
             guard let connection = output.connection(with: .video),
                   connection.isVideoMirroringSupported else { continue }
             connection.automaticallyAdjustsVideoMirroring = false
@@ -1654,11 +1904,10 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     /// Re-caps an already-running session (e.g. capture reopened from Places).
+    /// The cap is read when a take starts, so this only has to land before the
+    /// next one — it can't shorten a recording already in flight.
     func updateMaxDuration(_ seconds: TimeInterval) {
         maxDuration = seconds
-        sessionQueue.async { [movieOutput] in
-            movieOutput.maxRecordedDuration = CMTime(seconds: seconds, preferredTimescale: 600)
-        }
     }
 
     /// Swaps to the other camera.
@@ -1670,10 +1919,15 @@ final class CameraModel: NSObject, ObservableObject {
     func flip() {
         currentPosition = currentPosition == .back ? .front : .back
         let position = currentPosition
-        let duration = maxDuration
+        // A take in flight keeps the angle it started at. The new camera's
+        // connection comes up at its sensor default, and letting that — or the
+        // live coordinator angle — land mid-file would change the shape of the
+        // frames going into an already-open movie. Read here on the main
+        // thread, where `rotationAngle` and `isRecording` live.
+        let lockedAngle = isRecording ? rotationAngle : nil
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.configure(position: position, maxDuration: duration)
+            self.configure(position: position, lockedAngle: lockedAngle)
             // A torch belongs to the device, not the session: re-assert it
             // after the swap so a lit flash survives flipping to a camera that
             // has one. On the main thread, since it resolves the device
@@ -1732,16 +1986,32 @@ final class CameraModel: NSObject, ObservableObject {
 
     func recordClip(completion: @escaping (String?) -> Void) {
         guard !isRecording else { return }
-        videoCompletion = completion
         isRecording = true
-        let url = URL.documentsDirectory.appending(path: "clip-\(UUID().uuidString).mov")
-        movieOutput.startRecording(to: url, recordingDelegate: self)
+        let fileName = "clip-\(UUID().uuidString).mov"
+        let url = URL.documentsDirectory.appending(path: fileName)
+        // Settings come from the outputs so the file matches what the hardware
+        // is actually delivering rather than a guess at it.
+        recorder.start(url: url,
+                       maxDuration: maxDuration,
+                       videoSettings: videoOutput.recommendedVideoSettingsForAssetWriter(writingTo: .mov),
+                       audioSettings: audioOutput.recommendedAudioSettingsForAssetWriter(writingTo: .mov)) { [weak self] succeeded in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isRecording = false
+                completion(succeeded ? fileName : nil)
+                // A turn that arrived mid-recording was deliberately not pushed
+                // at the connections (it would have spliced two orientations
+                // into one file). Now that the file is closed, catch them up —
+                // otherwise the *next* clip inherits the angle from before it.
+                self.reapplyRotation()
+            }
+        }
     }
 
-    /// Stops an in-progress recording early; the delegate keeps the file.
+    /// Stops an in-progress recording early; the recorder keeps the file.
     func stopRecording() {
         guard isRecording else { return }
-        movieOutput.stopRecording()
+        recorder.stop()
     }
 
     func capturePhoto(completion: @escaping (String?) -> Void) {
@@ -1772,21 +2042,13 @@ final class CameraModel: NSObject, ObservableObject {
     }
 }
 
-extension CameraModel: AVCaptureFileOutputRecordingDelegate {
-    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
-                    from connections: [AVCaptureConnection], error: Error?) {
-        DispatchQueue.main.async {
-            self.isRecording = false
-            // maxRecordedDuration reached surfaces as an error with a successful file; keep it.
-            let succeeded = FileManager.default.fileExists(atPath: outputFileURL.path)
-            self.videoCompletion?(succeeded ? outputFileURL.lastPathComponent : nil)
-            self.videoCompletion = nil
-            // A turn that arrived mid-recording was deliberately not pushed at
-            // the connections (it would have spliced two orientations into one
-            // file). Now that the file is closed, catch them up — otherwise the
-            // *next* clip inherits the angle from before that turn.
-            MainActor.assumeIsolated { self.reapplyRotation() }
-        }
+extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+    /// Both capture outputs deliver here, on `bufferQueue` — the same queue the
+    /// recorder keeps its state on, so no further synchronisation is needed.
+    /// Buffers arriving while nothing is recording are dropped by the recorder.
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        recorder.append(sampleBuffer, isVideo: output === videoOutput)
     }
 }
 
@@ -1880,29 +2142,67 @@ struct CameraPreview: UIViewRepresentable {
     /// the file it produces. See `CameraModel.startTrackingRotation(for:)`.
     var rotationAngle: CGFloat
 
+    /// Whether the front camera is live, so the viewfinder can be mirrored
+    /// explicitly rather than inheriting whatever default the connection came up
+    /// with. See `PreviewView.push()`.
+    var isFrontCamera: Bool
+
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
-        view.applyRotation(rotationAngle)
+        view.apply(rotation: rotationAngle, mirrored: isFrontCamera)
         return view
     }
 
     func updateUIView(_ uiView: PreviewView, context: Context) {
-        uiView.applyRotation(rotationAngle)
+        uiView.apply(rotation: rotationAngle, mirrored: isFrontCamera)
     }
 
     final class PreviewView: UIView {
         override static var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
 
+        private var wantedAngle: CGFloat = 0
+        private var wantedMirroring = false
+
         /// The preview layer owns its own connection, which needs the rotation
-        /// pushed onto it separately from the outputs'.
-        func applyRotation(_ angle: CGFloat) {
-            guard let connection = previewLayer.connection,
-                  connection.isVideoRotationAngleSupported(angle),
-                  connection.videoRotationAngle != angle else { return }
-            connection.videoRotationAngle = angle
+        /// and mirroring pushed onto it separately from the outputs'.
+        ///
+        /// The values are *stored* rather than pushed and forgotten, because
+        /// this view's lifecycle and the session's are not synchronised: the
+        /// connection only exists once `configure()` has committed a live
+        /// input/output graph on the session queue, and `makeUIView` regularly
+        /// runs before that. A push that lands early has nothing to write to,
+        /// and the coordinator won't offer another angle unless the phone is
+        /// physically turned — so a viewfinder opened already-landscape and held
+        /// still used to stay stuck on the raw connection's defaults forever,
+        /// unrotated and mirrored, while the file it produced came out correct.
+        func apply(rotation angle: CGFloat, mirrored: Bool) {
+            wantedAngle = angle
+            wantedMirroring = mirrored
+            push()
+        }
+
+        /// UIKit calls this repeatedly as the view settles, including after the
+        /// session's graph has come up, so it's the safety net that lets a push
+        /// that arrived too early eventually land.
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            push()
+        }
+
+        private func push() {
+            guard let connection = previewLayer.connection else { return }
+            if connection.isVideoRotationAngleSupported(wantedAngle),
+               connection.videoRotationAngle != wantedAngle {
+                connection.videoRotationAngle = wantedAngle
+            }
+            guard connection.isVideoMirroringSupported else { return }
+            connection.automaticallyAdjustsVideoMirroring = false
+            if connection.isVideoMirrored != wantedMirroring {
+                connection.isVideoMirrored = wantedMirroring
+            }
         }
     }
 }

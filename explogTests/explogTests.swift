@@ -501,4 +501,491 @@ struct explogTests {
         #expect(CameraModel.orientedJPEG(from: Data([0x00, 0x01, 0x02]), rotationAngle: 0) == nil)
     }
 
+    // MARK: - Whose thread a clip of mine belongs to
+
+    /// The pairing feed's "you" pane must be scoped to the thread on screen.
+    ///
+    /// Reading my clip off `Friend.clip(forHourContaining:)` searches my whole
+    /// history, so a log sent to one friend showed up in my pane opposite every
+    /// friend on the roster — which looks exactly like the send having gone to
+    /// all of them.
+    @Test func myClipIsScopedToTheChatItWasSentTo() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let sent = Friend(name: "Sent", emoji: "🙃", hue: 0.1)
+        let unsent = Friend(name: "Unsent", emoji: "😐", hue: 0.2)
+        let sentChat = Chat(isGroup: false, members: [me, sent])
+        let unsentChat = Chat(isGroup: false, members: [me, unsent])
+        context.insert(sentChat)
+        context.insert(unsentChat)
+
+        let hour = Calendar.current.dateInterval(of: .hour, for: .now)!.start
+        let clip = Clip(author: me, chat: sentChat, capturedAt: hour,
+                        kind: .vibe, label: "for one person", emoji: "✨",
+                        hueA: 0, hueB: 0.1)
+        context.insert(clip)
+
+        // The thread it went to shows it...
+        #expect(sentChat.myClip(forHourContaining: hour)?.id == clip.id)
+        // ...and the thread it didn't go to shows nothing, which is the bug.
+        #expect(unsentChat.myClip(forHourContaining: hour) == nil)
+        // The unscoped lookup still finds it either way — that's precisely why
+        // the pairing feed can't use it for my own pane.
+        #expect(me.clip(forHourContaining: hour)?.id == clip.id)
+    }
+
+    @Test func myClipIgnoresOtherPeoplesClipsInTheSameThread() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+
+        let hour = Calendar.current.dateInterval(of: .hour, for: .now)!.start
+        let theirs = Clip(author: pal, chat: chat, capturedAt: hour,
+                          kind: .vibe, label: "theirs", emoji: "✨",
+                          hueA: 0, hueB: 0.1)
+        context.insert(theirs)
+
+        // The friend's own log lives in this thread too; my pane must not
+        // render it as mine.
+        #expect(chat.myClip(forHourContaining: hour) == nil)
+    }
+
+    @Test func myClipTakesTheLatestWithinTheHour() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+
+        // `clips` is an unordered SwiftData relationship, so "latest" has to be
+        // computed rather than taken from position.
+        let hour = Calendar.current.dateInterval(of: .hour, for: .now)!.start
+        let earlier = Clip(author: me, chat: chat, capturedAt: hour,
+                           kind: .vibe, label: "earlier", emoji: "✨",
+                           hueA: 0, hueB: 0.1)
+        let later = Clip(author: me, chat: chat, capturedAt: hour.addingTimeInterval(600),
+                         kind: .vibe, label: "later", emoji: "✨",
+                         hueA: 0, hueB: 0.1)
+        context.insert(earlier)
+        context.insert(later)
+
+        #expect(chat.myClip(forHourContaining: hour)?.id == later.id)
+        // A different hour is a different slot, not a fallback to the nearest.
+        #expect(chat.myClip(forHourContaining: hour.addingTimeInterval(-3600)) == nil)
+    }
+
+    // MARK: - Pulse outreach ordering
+
+    /// The distinction the whole ordering rests on: `lastActivityAt` counts
+    /// either party, `lastSentByMeAt` counts only me.
+    @Test func incomingActivityIsNotAnOutgoingSend() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+
+        let theirs = Clip(author: pal, chat: chat, capturedAt: .now,
+                          kind: .vibe, label: "theirs", emoji: "✨",
+                          hueA: 0, hueB: 0.1)
+        context.insert(theirs)
+        let theirMessage = Message(chat: chat, author: pal, text: "you around?")
+        context.insert(theirMessage)
+        chat.messages.append(theirMessage)
+
+        // Something clearly happened here...
+        #expect(chat.lastActivityAt >= theirs.capturedAt)
+        // ...but none of it was me, so Pulse has nothing to float.
+        #expect(chat.lastSentByMeAt == nil)
+    }
+
+    @Test func lastSentByMeTakesTheNewestOfMyLogsAndMessages() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+
+        let anHourAgo = Date(timeIntervalSinceNow: -3600)
+        let myClip = Clip(author: me, chat: chat, capturedAt: anHourAgo,
+                          kind: .vibe, label: "mine", emoji: "✨",
+                          hueA: 0, hueB: 0.1)
+        context.insert(myClip)
+        #expect(chat.lastSentByMeAt == anHourAgo)
+
+        // A message with no accompanying log counts just as much as a log.
+        let tenMinutesAgo = Date(timeIntervalSinceNow: -600)
+        let myMessage = Message(chat: chat, author: me, text: "on my way",
+                                sentAt: tenMinutesAgo)
+        context.insert(myMessage)
+        chat.messages.append(myMessage)
+        #expect(chat.lastSentByMeAt == tenMinutesAgo)
+
+        // A Stream message writes no local `Message` row, so the stamp is the
+        // only trace of it — and it has to count the same as the rest.
+        let justNow = Date(timeIntervalSinceNow: -5)
+        chat.noteOutgoingMessage(at: justNow)
+        #expect(chat.lastSentByMeAt == justNow)
+    }
+
+    /// Channel history replays as inserts every time a thread opens, so the
+    /// stamp has to be a high-water mark rather than a plain assignment — an
+    /// old message arriving late must not undo a send that just happened.
+    @Test func outgoingStampNeverMovesBackwards() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let chat = Chat(isGroup: false, members: [me])
+        context.insert(chat)
+
+        let recent = Date(timeIntervalSinceNow: -60)
+        chat.noteOutgoingMessage(at: recent)
+        chat.noteOutgoingMessage(at: Date(timeIntervalSinceNow: -9000))
+
+        #expect(chat.lastOutgoingMessageAt == recent)
+    }
+
+    /// The list is "who did I last exchange anything with", so a friend
+    /// writing to me outranks an older send of my own.
+    ///
+    /// This deliberately inverts the rule that used to hold here: leading on
+    /// my own sends meant somebody messaging me and getting no reply never
+    /// moved at all, which is the person the list most needs to surface.
+    @Test func pulseOrdersByActivityInEitherDirection() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let messaged = Friend(name: "Messaged", emoji: "🙃", hue: 0.1)
+        let noisy = Friend(name: "Noisy", emoji: "😐", hue: 0.2)
+        let messagedChat = Chat(isGroup: false, members: [me, messaged])
+        let noisyChat = Chat(isGroup: false, members: [me, noisy])
+        context.insert(messagedChat)
+        context.insert(noisyChat)
+
+        // I wrote to one of them an hour ago...
+        let mine = Message(chat: messagedChat, author: me, text: "hey",
+                           sentAt: Date(timeIntervalSinceNow: -3600))
+        context.insert(mine)
+        messagedChat.messages.append(mine)
+        // ...and the other one wrote to me a minute ago.
+        let theirs = Message(chat: noisyChat, author: noisy, text: "yo",
+                             sentAt: Date(timeIntervalSinceNow: -60))
+        context.insert(theirs)
+        noisyChat.messages.append(theirs)
+
+        let entries = [PulseEntry(friend: messaged, chat: messagedChat),
+                       PulseEntry(friend: noisy, chat: noisyChat)]
+            .sorted(by: PulseEntry.byOutreach)
+
+        #expect(entries.map(\.name) == ["Noisy", "Messaged"])
+    }
+
+    /// A Stream message from a friend carries no local `Message` row, so the
+    /// incoming stamp is the only trace of it — and it has to move Pulse.
+    @Test func incomingStreamMessageFloatsTheFriendToTheTop() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let quiet = Friend(name: "Quiet", emoji: "🙃", hue: 0.1)
+        let texter = Friend(name: "Texter", emoji: "😐", hue: 0.2)
+        let quietChat = Chat(isGroup: false, members: [me, quiet])
+        let texterChat = Chat(isGroup: false, members: [me, texter])
+        context.insert(quietChat)
+        context.insert(texterChat)
+
+        // I reached out to one of them an hour ago; the other one texted me a
+        // minute ago and I haven't answered.
+        quietChat.noteOutgoingMessage(at: Date(timeIntervalSinceNow: -3600))
+        texterChat.noteIncomingMessage(at: Date(timeIntervalSinceNow: -60))
+
+        let entries = [PulseEntry(friend: quiet, chat: quietChat),
+                       PulseEntry(friend: texter, chat: texterChat)]
+            .sorted(by: PulseEntry.byOutreach)
+
+        #expect(entries.map(\.name) == ["Texter", "Quiet"])
+    }
+
+    /// Nobody drops off the list for having no history — they just sit under
+    /// everyone who does.
+    @Test func friendsWithNoActivitySortLast() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let reached = Friend(name: "Reached", emoji: "🙃", hue: 0.1)
+        let recent = Friend(name: "Recent", emoji: "😐", hue: 0.2)
+        let quiet = Friend(name: "Quiet", emoji: "😶", hue: 0.3)
+        let reachedChat = Chat(isGroup: false, members: [me, reached])
+        let recentChat = Chat(isGroup: false, members: [me, recent])
+        let emptyChat = Chat(isGroup: false, members: [me, quiet])
+        context.insert(reachedChat)
+        context.insert(recentChat)
+        context.insert(emptyChat)
+
+        reachedChat.noteOutgoingMessage(at: Date(timeIntervalSinceNow: -3 * 86_400))
+        let theirs = Message(chat: recentChat, author: recent, text: "yo",
+                             sentAt: Date(timeIntervalSinceNow: -60))
+        context.insert(theirs)
+        recentChat.messages.append(theirs)
+
+        let entries = [PulseEntry(friend: quiet, chat: emptyChat),
+                       PulseEntry(friend: reached, chat: reachedChat),
+                       PulseEntry(friend: recent, chat: recentChat)]
+            .sorted(by: PulseEntry.byOutreach)
+
+        // `emptyChat` was created just now, so if bare creation counted as
+        // activity it would sort first — the exact trap `lastRealActivityAt`
+        // exists to avoid once the order leads on activity.
+        #expect(entries.map(\.name) == ["Recent", "Reached", "Quiet"])
+    }
+
+    // MARK: - Unread dot
+
+    /// The bug this fixes: a friend's text writes neither a `Clip` nor a local
+    /// `Message`, so a guard that counted only those two collections kept the
+    /// dot dark no matter how far `lastActivityAt` had moved.
+    @Test func incomingStreamMessageLightsTheUnreadDot() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+
+        // Read five minutes ago, and nothing has happened since.
+        chat.lastReadAt = Date(timeIntervalSinceNow: -300)
+        #expect(!chat.hasUnread)
+
+        chat.noteIncomingMessage(at: Date(timeIntervalSinceNow: -60))
+        #expect(chat.hasUnread)
+
+        // Opening the thread clears it, and it stays clear.
+        chat.markRead()
+        #expect(!chat.hasUnread)
+    }
+
+    /// The dot is for what *arrived*, not for what I did. My own send moves
+    /// `lastActivityAt` too, so this is the case that would false-positive if
+    /// `markRead` weren't the thing gating it.
+    @Test func freshEmptyChatHasNothingUnread() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        // Auto-created by tapping Message and never used — `lastActivityAt`
+        // still answers with `createdAt`, which sits after a nil `lastReadAt`.
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+
+        #expect(!chat.hasUnread)
+        #expect(chat.lastRealActivityAt == nil)
+    }
+
+    /// The bug: `SendToFriendsView.send()` appends my clip to the chat and
+    /// never marks it read, so sending a log to a friend lit that friend's
+    /// unread dot with no friend involved at all. The dot is for what arrived.
+    @Test func myOwnSendDoesNotLightTheUnreadDot() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+        chat.lastReadAt = Date(timeIntervalSinceNow: -300)
+
+        // My log, sent to them — the exact shape `SendToFriendsView` writes.
+        let mine = Clip(author: me, chat: chat, capturedAt: .now,
+                        kind: .vibe, label: "mine", emoji: "✨",
+                        hueA: 0, hueB: 0.1)
+        context.insert(mine)
+        chat.clips.append(mine)
+        // My text, on the Stream path.
+        chat.noteOutgoingMessage(at: .now)
+
+        // Pulse still floats the thread — that ordering is any-party on
+        // purpose — but nothing has *arrived*, so the dot stays dark.
+        #expect(chat.lastActivityAt >= mine.capturedAt)
+        #expect(!chat.hasUnread)
+
+        // Their reply is what lights it, and opening clears it.
+        chat.noteIncomingMessage(at: .now)
+        #expect(chat.hasUnread)
+        chat.markRead()
+        #expect(!chat.hasUnread)
+    }
+
+    /// A friend's *log* counts as arrival too, not just their text — the log
+    /// feed is the main way things land in a thread.
+    @Test func aFriendsLogLightsTheUnreadDot() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let pal = Friend(name: "Pal", emoji: "🙃", hue: 0.1)
+        let chat = Chat(isGroup: false, members: [me, pal])
+        context.insert(chat)
+        chat.lastReadAt = Date(timeIntervalSinceNow: -300)
+
+        let theirs = Clip(author: pal, chat: chat, capturedAt: .now,
+                          kind: .vibe, label: "theirs", emoji: "✨",
+                          hueA: 0, hueB: 0.1)
+        context.insert(theirs)
+        chat.clips.append(theirs)
+
+        #expect(chat.hasUnread)
+    }
+
+    /// Incoming and outgoing are separate high-water marks: a reply of mine
+    /// must not overwrite when the friend last wrote, or the two stamps would
+    /// race and whichever landed last would win.
+    @Test func incomingAndOutgoingStampsAreIndependent() throws {
+        let context = try makeContext()
+        let me = Friend(name: "Me", emoji: "🙂", hue: 0.5, isMe: true)
+        let chat = Chat(isGroup: false, members: [me])
+        // Backdated, because `lastActivityAt` floors at `createdAt` — a chat
+        // made this instant would out-rank both stamps below and the max would
+        // be testing nothing.
+        chat.createdAt = Date(timeIntervalSinceNow: -600)
+        context.insert(chat)
+
+        let theirs = Date(timeIntervalSinceNow: -120)
+        let mine = Date(timeIntervalSinceNow: -60)
+        chat.noteIncomingMessage(at: theirs)
+        chat.noteOutgoingMessage(at: mine)
+
+        #expect(chat.lastIncomingMessageAt == theirs)
+        #expect(chat.lastOutgoingMessageAt == mine)
+        #expect(chat.lastActivityAt == mine)
+
+        // Replayed history must not walk either stamp backwards.
+        chat.noteIncomingMessage(at: Date(timeIntervalSinceNow: -9000))
+        #expect(chat.lastIncomingMessageAt == theirs)
+    }
+
+    // MARK: - Places feed pruning
+
+    /// Builds a public-log payload row. Only the fields the prune reads
+    /// actually matter; the rest are filler so the struct can be made.
+    private func publicLog(id: String, spotId: String, capturedAt: Date) -> LogSync.RemotePublicLog {
+        LogSync.RemotePublicLog(
+            id: id, authorUid: "uid", authorName: "Author", authorHandle: "@author",
+            authorAvatarEmoji: "🙂", authorAvatarURL: "", spotId: spotId, spotName: "Spot",
+            kind: "video", mediaURL: "", caption: "", emoji: "✨", hueA: 0, hueB: 0.1,
+            capturedAt: capturedAt.timeIntervalSince1970 * 1000,
+            likeCount: nil, commentCount: nil, viewCount: nil, likedByMe: nil
+        )
+    }
+
+    private func spotClip(id: String, spot: Spot?, capturedAt: Date,
+                          in context: ModelContext) -> SpotClip {
+        let clip = SpotClip(spot: spot, authorName: "Author", label: "", emoji: "✨",
+                            hueA: 0, hueB: 0.1, capturedAt: capturedAt)
+        clip.remoteID = id
+        context.insert(clip)
+        return clip
+    }
+
+    /// The delete bug: the server stops returning a deleted log, but the local
+    /// `SpotClip` used to survive every sync and keep rendering in Places.
+    @Test func pruneDropsRowsTheServerNoLongerReturns() throws {
+        let context = try makeContext()
+        let sync = LogSync()
+        let kept = spotClip(id: "kept", spot: nil, capturedAt: Date(timeIntervalSinceNow: -60),
+                            in: context)
+        let deleted = spotClip(id: "deleted", spot: nil, capturedAt: Date(timeIntervalSinceNow: -120),
+                               in: context)
+
+        // A short page: the server ran out of rows, so "absent" means gone.
+        sync.prunePublic([publicLog(id: "kept", spotId: "spot-1",
+                                    capturedAt: Date(timeIntervalSinceNow: -60))],
+                         spotID: nil, pageLimit: 80, into: context)
+
+        let remaining = try context.fetch(FetchDescriptor<SpotClip>()).map(\.remoteID)
+        #expect(remaining == ["kept"])
+        _ = (kept, deleted)
+    }
+
+    /// A *full* page proves nothing about what fell off the end of it, so the
+    /// prune is confined to the window the page actually spans. Without this
+    /// rule, a feed with more than one page of clips would delete its own
+    /// backlog on every sync.
+    @Test func pruneLeavesRowsOlderThanAFullPage() throws {
+        let context = try makeContext()
+        let sync = LogSync()
+        let windowStart = Date(timeIntervalSinceNow: -3600)
+        _ = spotClip(id: "older", spot: nil, capturedAt: Date(timeIntervalSinceNow: -86_400),
+                     in: context)
+        _ = spotClip(id: "inWindow", spot: nil, capturedAt: Date(timeIntervalSinceNow: -1800),
+                     in: context)
+
+        // Exactly `pageLimit` rows back = the page was capped.
+        let page = (0..<3).map {
+            publicLog(id: "server-\($0)", spotId: "spot-1",
+                      capturedAt: windowStart.addingTimeInterval(Double($0) * 60))
+        }
+        sync.prunePublic(page, spotID: nil, pageLimit: 3, into: context)
+
+        let remaining = Set(try context.fetch(FetchDescriptor<SpotClip>()).map(\.remoteID))
+        // Inside the window and absent → genuinely deleted.
+        #expect(!remaining.contains("inWindow"))
+        // Older than the window → simply off the end of the page.
+        #expect(remaining.contains("older"))
+    }
+
+    /// A spot-scoped sync only speaks for that spot. Pruning everything else
+    /// would empty the Places feed every time a single place was opened.
+    @Test func spotScopedPruneLeavesOtherPlacesAlone() throws {
+        let context = try makeContext()
+        let sync = LogSync()
+        let here = Spot(name: "Here", category: "", summary: "", aiInsight: "",
+                        distanceMiles: 0, emoji: "📍", hueA: 0, hueB: 0.1)
+        here.remoteID = "spot-here"
+        let elsewhere = Spot(name: "Elsewhere", category: "", summary: "", aiInsight: "",
+                             distanceMiles: 0, emoji: "🗺️", hueA: 0, hueB: 0.1)
+        elsewhere.remoteID = "spot-elsewhere"
+        context.insert(here)
+        context.insert(elsewhere)
+
+        _ = spotClip(id: "gone-here", spot: here, capturedAt: .now, in: context)
+        _ = spotClip(id: "still-elsewhere", spot: elsewhere, capturedAt: .now, in: context)
+
+        // The server says this spot now has nothing public at all.
+        sync.prunePublic([], spotID: "spot-here", pageLimit: 80, into: context)
+
+        let remaining = Set(try context.fetch(FetchDescriptor<SpotClip>()).map(\.remoteID))
+        #expect(remaining == ["still-elsewhere"])
+    }
+
+    /// A row that has never been published has no server id to be missing
+    /// from the payload — including the mirror written the instant you post,
+    /// before the upload has come back with its id.
+    @Test func pruneLeavesUnpublishedLocalRows() throws {
+        let context = try makeContext()
+        let sync = LogSync()
+        let local = SpotClip(spot: nil, authorName: "Me", label: "just posted", emoji: "✨",
+                             hueA: 0, hueB: 0.1, capturedAt: .now)
+        context.insert(local)
+
+        sync.prunePublic([], spotID: nil, pageLimit: 80, into: context)
+
+        #expect(try context.fetch(FetchDescriptor<SpotClip>()).count == 1)
+    }
+
+    // MARK: - Beacon start time
+
+    @Test func beaconStartLabelNamesTodayAndTomorrow() throws {
+        let spot = Spot(name: "Pier", category: "park", summary: "", aiInsight: "",
+                        distanceMiles: 1, emoji: "🌊", hueA: 0, hueB: 0.1)
+        let today = Beacon(spot: spot, host: nil, note: "",
+                           startsAt: Calendar.current.date(bySettingHour: 15, minute: 0, second: 0,
+                                                           of: .now)!,
+                           capacity: 4)
+        #expect(today.startsAtLabel.hasPrefix("Today · "))
+
+        let tomorrow = Beacon(spot: spot, host: nil, note: "",
+                              startsAt: Calendar.current.date(byAdding: .day, value: 1, to: .now)!,
+                              capacity: 4)
+        #expect(tomorrow.startsAtLabel.hasPrefix("Tomorrow · "))
+
+        // Anything further out is dated, since the weekday alone is ambiguous.
+        let later = Beacon(spot: spot, host: nil, note: "",
+                           startsAt: Calendar.current.date(byAdding: .day, value: 5, to: .now)!,
+                           capacity: 4)
+        #expect(!later.startsAtLabel.hasPrefix("Today"))
+        #expect(!later.startsAtLabel.hasPrefix("Tomorrow"))
+        #expect(later.startsAtLabel.contains(" · "))
+    }
+
 }

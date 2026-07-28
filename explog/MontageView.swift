@@ -29,7 +29,9 @@ struct MontageView: View {
                 }
             } else {
                 let clip = todaysClips[min(index, todaysClips.count - 1)]
-                ClipView(clip: clip, isActive: true)
+                // `.fit` over the black base: the recap shows the whole frame,
+                // the same as every other surface.
+                ClipView(clip: clip, isActive: true, contentMode: .fit)
                     .id(clip.id)
                     .transition(.opacity)
                     .ignoresSafeArea()
@@ -65,7 +67,7 @@ struct MontageView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(clip.label)
-                                .font(.subheadline.weight(.medium))
+                                .font(.logCaption)
                                 .foregroundStyle(.white)
                             Text(clip.capturedAt.hourOnlyClockTime)
                                 .font(.caption)

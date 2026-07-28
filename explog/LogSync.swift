@@ -229,16 +229,65 @@ final class LogSync {
 
     // MARK: Sync down
 
+    /// When the last successful sync-down finished, and when the last one that
+    /// asked for *everything* did.
+    ///
+    /// Both drive `syncDown`'s two cost controls. Session-scoped on purpose:
+    /// a cold launch should always take the full page, since anything could
+    /// have changed while the app wasn't running.
+    private var lastSyncedAt: Date?
+    private var lastFullSyncAt: Date?
+    /// Who the timestamps above describe. `LogSync` outlives a sign-out, and a
+    /// new account inheriting the previous one's cursor would take a delta
+    /// against a store that has just been wiped — i.e. start out empty and stay
+    /// that way until the next full refresh.
+    private var cursorUID: String?
+
+    /// A sync-down closer together than this is treated as redundant. Pulse's
+    /// `.task` re-runs on every reappearance — returning from any full-screen
+    /// cover, not just a cold launch — and each run was re-downloading the same
+    /// page it had just fetched seconds earlier.
+    private let staleAfter: TimeInterval = 45
+    /// How often to take the full page rather than a delta. A cursored sync
+    /// only sees logs newer than the cursor, so counters on older logs (views)
+    /// would drift forever without a periodic full refresh.
+    private let fullSyncEvery: TimeInterval = 10 * 60
+    /// Backdates the cursor. `capturedAt` is capture time, not publish time, so
+    /// a log queued offline and uploaded later can land *behind* the cursor;
+    /// re-asking for a few minutes of overlap is far cheaper than missing it.
+    private let cursorOverlap: TimeInterval = 5 * 60
+
     /// Pulls friends' recent logs and mirrors them into the local cache.
-    func syncDown(context: ModelContext) async {
+    ///
+    /// - Parameter force: skips the staleness guard. Set it for an explicit
+    ///   user-initiated refresh, where "nothing has changed" is still worth
+    ///   confirming against the server.
+    func syncDown(context: ModelContext, force: Bool = false) async {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         guard !isSyncing else { return }
+        if cursorUID != uid {
+            cursorUID = uid
+            lastSyncedAt = nil
+            lastFullSyncAt = nil
+        }
+        if !force, let lastSyncedAt, Date().timeIntervalSince(lastSyncedAt) < staleAfter {
+            return
+        }
         isSyncing = true
         defer { isSyncing = false }
 
+        // A full page on the first sync of the session and periodically after;
+        // a delta the rest of the time.
+        let wantsFull = lastFullSyncAt.map { Date().timeIntervalSince($0) >= fullSyncEvery } ?? true
+        var payload: [String: Any] = ["limit": 80]
+        if !wantsFull, let lastSyncedAt {
+            let cursor = lastSyncedAt.addingTimeInterval(-cursorOverlap)
+            payload["since"] = cursor.timeIntervalSince1970 * 1000
+        }
+
         do {
             let response = try await CallableFunctions.call("listFriendLogs",
-                                                            data: ["limit": 80],
+                                                            data: payload,
                                                             as: FriendLogsResponse.self)
 
             // Same guard as FriendGraph.refresh: never touch the store on
@@ -246,6 +295,9 @@ final class LogSync {
             guard !Task.isCancelled, Auth.auth().currentUser?.uid == uid else { return }
 
             materialise(response.logs, into: context)
+            let now = Date()
+            lastSyncedAt = now
+            if wantsFull { lastFullSyncAt = now }
             lastError = nil
         } catch let error as CallableFunctions.CallableError {
             guard Auth.auth().currentUser?.uid == uid else { return }
@@ -266,7 +318,8 @@ final class LogSync {
         guard let uid = Auth.auth().currentUser?.uid else { return }
 
         do {
-            var payload: [String: Any] = ["limit": 80]
+            let pageLimit = 80
+            var payload: [String: Any] = ["limit": pageLimit]
             if let spotID { payload["spotId"] = spotID }
             let response = try await CallableFunctions.call("listPublicLogs",
                                                             data: payload,
@@ -274,7 +327,7 @@ final class LogSync {
 
             guard !Task.isCancelled, Auth.auth().currentUser?.uid == uid else { return }
 
-            materialisePublic(response.logs, into: context)
+            materialisePublic(response.logs, spotID: spotID, pageLimit: pageLimit, into: context)
             lastError = nil
         } catch let error as CallableFunctions.CallableError {
             guard Auth.auth().currentUser?.uid == uid else { return }
@@ -286,20 +339,39 @@ final class LogSync {
     }
 
     /// Creates or updates a `SpotClip` per public log, hanging it off a local
-    /// mirror of its spot.
-    private func materialisePublic(_ logs: [RemotePublicLog], into context: ModelContext) {
-        guard !logs.isEmpty else { return }
+    /// mirror of its spot, then drops the local rows the server no longer
+    /// returns.
+    ///
+    /// The prune is the half that makes a delete stick. `listPublicLogs` reads
+    /// the live `logs` collection, so a log removed by `deleteLog` simply stops
+    /// coming back — but this used to only ever insert and update, so the
+    /// orphaned `SpotClip` sat in the store and kept rendering in Places, Niche
+    /// and Bookmarks indefinitely.
+    private func materialisePublic(_ logs: [RemotePublicLog], spotID: String?,
+                                   pageLimit: Int, into context: ModelContext) {
+        if !logs.isEmpty { upsertPublic(logs, into: context) }
+        prunePublic(logs, spotID: spotID, pageLimit: pageLimit, into: context)
+        try? context.save()
+    }
 
-        let existing = (try? context.fetch(FetchDescriptor<SpotClip>())) ?? []
+    /// Everything the server *did* return, written into the store.
+    private func upsertPublic(_ logs: [RemotePublicLog], into context: ModelContext) {
+        // Scoped to this batch for the same reason as `materialise` above.
+        let remoteIDs = Set(logs.map(\.id)).filter { !$0.isEmpty }
+        let spotIDs = Set(logs.map(\.spotId)).filter { !$0.isEmpty }
+
+        let existing = (try? context.fetch(
+            FetchDescriptor<SpotClip>(predicate: #Predicate { remoteIDs.contains($0.remoteID) })
+        )) ?? []
         let byRemoteID = Dictionary(
-            existing.filter { !$0.remoteID.isEmpty }.map { ($0.remoteID, $0) },
+            existing.map { ($0.remoteID, $0) },
             uniquingKeysWith: { first, _ in first }
         )
 
         var spots = Dictionary(
-            ((try? context.fetch(FetchDescriptor<Spot>())) ?? [])
-                .filter { !$0.remoteID.isEmpty }
-                .map { ($0.remoteID, $0) },
+            ((try? context.fetch(
+                FetchDescriptor<Spot>(predicate: #Predicate { spotIDs.contains($0.remoteID) })
+            )) ?? []).map { ($0.remoteID, $0) },
             uniquingKeysWith: { first, _ in first }
         )
 
@@ -351,10 +423,52 @@ final class LogSync {
             clip.authorAvatarEmoji = log.authorAvatarEmoji
             clip.label = log.caption
             clip.emoji = log.emoji
+            // Engagement is the server's to report: these counters are shared
+            // across everyone looking at the clip, and `likedByMe` is resolved
+            // for this caller specifically. A response from a server that
+            // predates them leaves whatever is already on the row.
+            if let likeCount = log.likeCount { clip.likeCount = max(0, likeCount) }
+            if let likedByMe = log.likedByMe { clip.likedByMe = likedByMe }
+            if let viewCount = log.viewCount { clip.viewCount = max(0, viewCount) }
             if clip.spot == nil { clip.spot = spot }
         }
+    }
 
-        try? context.save()
+    /// Deletes local `SpotClip` rows the server has stopped returning.
+    ///
+    /// The response is a *page*, not the whole feed — `publicLogsFor` orders by
+    /// `capturedAt` descending and caps at `pageLimit` — so "absent from this
+    /// payload" does not by itself mean "deleted". Two rules keep the prune
+    /// honest about that:
+    ///
+    /// - A short page means the server ran out of rows, so everything in scope
+    ///   was accounted for and anything missing is genuinely gone.
+    /// - A full page only proves what it covers, so the prune is confined to
+    ///   the window it spans: rows at or after the oldest log returned. An
+    ///   older row simply fell off the end of the page and is left alone.
+    ///
+    /// Rows never published (empty `remoteID`) are local-only and out of scope
+    /// either way — including the mirror written the instant you post, which
+    /// hasn't been stamped with its server id yet.
+    /// Internal rather than private so the two page rules above can be tested
+    /// directly — they are the whole safety argument for deleting local rows.
+    func prunePublic(_ logs: [RemotePublicLog], spotID: String?,
+                     pageLimit: Int, into context: ModelContext) {
+        let live = Set(logs.map(\.id))
+        let isCompletePage = logs.count < pageLimit
+        // Deliberately not `.min()` of nothing: an empty *full* page is a
+        // contradiction, and an empty short page is handled by the rule above.
+        let windowStart = logs.map { Date(timeIntervalSince1970: $0.capturedAt / 1000) }.min()
+        guard isCompletePage || windowStart != nil else { return }
+
+        let candidates = (try? context.fetch(FetchDescriptor<SpotClip>())) ?? []
+        for clip in candidates where !clip.remoteID.isEmpty && !live.contains(clip.remoteID) {
+            // A spot-scoped sync only speaks for that spot; every other place's
+            // clips are simply outside what this response was asked about.
+            if let spotID, clip.spot?.remoteID != spotID { continue }
+            if !isCompletePage, let windowStart, clip.capturedAt < windowStart { continue }
+            context.delete(clip)
+        }
     }
 
     /// Creates or updates a `Clip` per remote log, attached to its author.
@@ -365,15 +479,28 @@ final class LogSync {
     private func materialise(_ logs: [RemoteLog], into context: ModelContext) {
         guard !logs.isEmpty else { return }
 
-        let friends = (try? context.fetch(FetchDescriptor<Friend>())) ?? []
+        // Both lookups are scoped to the ids actually present in this batch and
+        // pushed down to the store. They used to fetch the *entire* `Friend` and
+        // `Clip` tables to build dictionaries that only ever get read for these
+        // ≤80 logs — on the main actor, on every sync. That cost grew with the
+        // user's whole local history, which is exactly the thing that gets
+        // worse over a beta rather than better.
+        let authorUIDs = Set(logs.map(\.authorUid)).filter { !$0.isEmpty }
+        let remoteIDs = Set(logs.map(\.id)).filter { !$0.isEmpty }
+
+        let friends = (try? context.fetch(
+            FetchDescriptor<Friend>(predicate: #Predicate { authorUIDs.contains($0.remoteUID) })
+        )) ?? []
         let byUID = Dictionary(
-            friends.filter { !$0.remoteUID.isEmpty }.map { ($0.remoteUID, $0) },
+            friends.map { ($0.remoteUID, $0) },
             uniquingKeysWith: { first, _ in first }
         )
 
-        let existing = (try? context.fetch(FetchDescriptor<Clip>())) ?? []
+        let existing = (try? context.fetch(
+            FetchDescriptor<Clip>(predicate: #Predicate { remoteIDs.contains($0.remoteID) })
+        )) ?? []
         let byRemoteID = Dictionary(
-            existing.filter { !$0.remoteID.isEmpty }.map { ($0.remoteID, $0) },
+            existing.map { ($0.remoteID, $0) },
             uniquingKeysWith: { first, _ in first }
         )
 
@@ -401,6 +528,7 @@ final class LogSync {
             clip.isRemote = true
             clip.label = log.caption
             clip.emoji = log.emoji
+            if let viewCount = log.viewCount { clip.viewCount = max(0, viewCount) }
             if clip.author == nil { clip.author = author }
         }
 
@@ -452,6 +580,15 @@ final class LogSync {
         let hueA: Double
         let hueB: Double
         let capturedAt: Double
+        /// Engagement counters, server-owned. Optional so a response from a
+        /// deployment that predates them still decodes.
+        let likeCount: Int?
+        let commentCount: Int?
+        let viewCount: Int?
+        /// Whether *this* viewer has liked it — resolved per-caller server-side,
+        /// which is what makes a like visible across accounts instead of only
+        /// on the device that made it.
+        let likedByMe: Bool?
     }
 
     struct RemoteLog: Decodable {
@@ -464,5 +601,6 @@ final class LogSync {
         let hueA: Double
         let hueB: Double
         let capturedAt: Double
+        let viewCount: Int?
     }
 }

@@ -56,19 +56,12 @@ struct PulseHomeView: View {
     }
     private var groups: [Chat] { chats.filter(\.isGroup) }
 
-    /// Every friend and group as one comparable list, newest activity first so
-    /// the live part of the hour reads before the quiet part.
+    /// Every friend and group as one comparable list, ordered by who I most
+    /// recently reached out to.
     private var allEntries: [PulseEntry] {
         let people = roster.map { PulseEntry(friend: $0, chat: existingChat(with: $0)) }
         let crews = groups.map(PulseEntry.init(group:))
-        return (people + crews).sorted { lhs, rhs in
-            switch (lhs.activityAt, rhs.activityAt) {
-            case let (l?, r?): l > r
-            case (_?, nil): true
-            case (nil, _?): false
-            case (nil, nil): lhs.name < rhs.name
-            }
-        }
+        return (people + crews).sorted(by: PulseEntry.byOutreach)
     }
 
     private var entries: [PulseEntry] {
@@ -84,9 +77,7 @@ struct PulseHomeView: View {
 
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        HourlyCadenceBanner(postedThisHour: postedThisHour) {
-                            destination = .hourlyWall
-                        }
+                        HourlyCadenceBanner(postedThisHour: postedThisHour)
                         .padding(.horizontal, 16)
                         .padding(.top, 6)
                         .padding(.bottom, 10)
@@ -137,6 +128,9 @@ struct PulseHomeView: View {
                 NavigationStack {
                     ChatDetailView(chat: chat) { self.destination = nil }
                 }
+                // A cover has no dismiss gesture of its own; the ✕ was the
+                // only way out of a thread opened from here.
+                .swipeRightToDismiss { self.destination = nil }
             }
         }
         .sheet(isPresented: $showFriendHub) { FriendHubView(initialTab: friendHubTab) }
@@ -385,6 +379,9 @@ struct PulseEntry: Identifiable {
     let status: String
     let streak: Int
     let activityAt: Date?
+    /// When I last sent a log or message here — the list's primary order.
+    /// Nil for anyone I've never reached out to. See `Chat.lastSentByMeAt`.
+    let sentByMeAt: Date?
     let members: [Friend]
     let isOnline: Bool
     /// The underlying thread, when one exists — the real source of the
@@ -398,8 +395,12 @@ struct PulseEntry: Identifiable {
         status = friend.latestCaption
         streak = friend.streakCount
         // A message with no accompanying log still counts as activity, so a
-        // reply-only exchange bumps this row the same way a new clip does.
-        activityAt = chat?.lastActivityAt ?? friend.latestClip?.capturedAt
+        // reply-only exchange bumps this row the same way a new clip does —
+        // in either direction. `lastRealActivityAt`, so a thread auto-created
+        // by tapping Message and then left empty doesn't outrank one with a
+        // real conversation in it.
+        activityAt = chat?.lastRealActivityAt ?? friend.latestClip?.capturedAt
+        sentByMeAt = chat?.lastSentByMeAt
         members = [friend]
         isOnline = friend.isOnline
         self.chat = chat
@@ -411,7 +412,8 @@ struct PulseEntry: Identifiable {
         name = group.displayName
         status = group.latestCaption
         streak = group.streakCount
-        activityAt = group.lastActivityAt
+        activityAt = group.lastRealActivityAt
+        sentByMeAt = group.lastSentByMeAt
         members = group.members.filter { !$0.isMe }
         // A crew is "live" when anyone but you is.
         isOnline = group.members.contains { !$0.isMe && $0.isOnline }
@@ -419,6 +421,26 @@ struct PulseEntry: Identifiable {
     }
 
     var isGroup: Bool { if case .group = kind { true } else { false } }
+
+    /// Pulse's row order: whoever you and this person last exchanged anything
+    /// with, either direction.
+    ///
+    /// Ordered on `activityAt`, which counts both parties. It used to lead with
+    /// `sentByMeAt` so the list read strictly as "who did I last reach out to",
+    /// and that made the order half-blind: a friend who sent you a log or a
+    /// message and got no reply from you didn't move at all, which is the
+    /// person a conversation list most needs to surface.
+    ///
+    /// Anyone with no activity at all sorts below everyone who has some, by
+    /// name — a roster you've never touched still reads alphabetically.
+    static func byOutreach(_ lhs: PulseEntry, _ rhs: PulseEntry) -> Bool {
+        switch (lhs.activityAt, rhs.activityAt) {
+        case let (l?, r?): return l > r
+        case (_?, nil): return true
+        case (nil, _?): return false
+        case (nil, nil): return lhs.name < rhs.name
+        }
+    }
 
     /// The chat's own read cursor is authoritative whenever there is a chat.
     /// Only a friend with no thread yet falls back to a time-based proxy —

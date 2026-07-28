@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import FirebaseAuth
 
 // MARK: - View A: Niche Places feed
 //
@@ -199,6 +200,7 @@ private struct PlacePage: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(FollowGraph.self) private var followGraph
+    @Environment(EngagementSync.self) private var engagementSync
     @Query private var friends: [Friend]
     @State private var showComments = false
     @State private var showShare = false
@@ -251,7 +253,15 @@ private struct PlacePage: View {
     /// Following is only offered when there's someone real to follow — seed
     /// clips have no account, and a chip that can't do anything is worse than
     /// no chip.
-    private var canFollow: Bool { !authorUID.isEmpty }
+    ///
+    /// Your own public posts appear in this feed like anyone else's, so the
+    /// author check has to exclude yourself as well. The server has always
+    /// rejected a self-follow and `toggleFollow` swallows the failure, so the
+    /// chip was never able to do anything here — it just sat there looking
+    /// live. Same rule the profile sheet's Follow button already applies.
+    private var canFollow: Bool {
+        !authorUID.isEmpty && authorUID != Auth.auth().currentUser?.uid
+    }
 
     private var isFollowing: Bool { pendingFollow ?? followGraph.isFollowing(authorUID) }
 
@@ -284,6 +294,14 @@ private struct PlacePage: View {
             ClipMediaView(spotClip: clip, isActive: isActive, contentMode: .fit)
                 .background(Color.black)
                 .ignoresSafeArea()
+                // A view is counted when the clip is the one actually on
+                // screen, not when its pane is built — a feed builds panes
+                // either side of the visible one to make paging smooth, and
+                // counting those would report views nobody had.
+                .task(id: isActive) {
+                    guard isActive else { return }
+                    engagementSync.markViewed(logID: clip.remoteID)
+                }
 
             // Keeps the glass and the caption legible over bright footage.
             LinearGradient(colors: [.clear, .black.opacity(0.25), .black.opacity(0.72)],
@@ -409,7 +427,7 @@ private struct PlacePage: View {
             .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
 
             Text(clip.label)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.logCaption)
                 .foregroundStyle(Theme.textPrimary)
                 .lineLimit(captionExpanded ? 6 : 1)
 
@@ -458,10 +476,11 @@ private struct PlacePage: View {
         .frame(maxWidth: 280, alignment: .leading)
     }
 
+    /// Hands the like to the server, which is what makes it visible to anyone
+    /// else. `EngagementSync` does the optimistic flip and puts it back if the
+    /// call fails, so the tap still lands on this frame.
     private func toggleLike() {
-        clip.likedByMe.toggle()
-        clip.likeCount += clip.likedByMe ? 1 : -1
-        try? modelContext.save()
+        Task { await engagementSync.toggleLike(clip, context: modelContext) }
     }
 }
 
@@ -471,7 +490,11 @@ struct CommentsSheet: View {
     let clip: SpotClip
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(EngagementSync.self) private var engagementSync
     @State private var draft = ""
+    /// True while a comment is on its way up, so the send button can't fire the
+    /// same text twice.
+    @State private var posting = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -522,23 +545,35 @@ struct CommentsSheet: View {
                     }
                     .foregroundStyle(Theme.textPrimary)
                     .onSubmit(post)
-                SendButton(enabled: !draft.isEmpty, action: post)
+                SendButton(enabled: !draft.isEmpty && !posting, action: post)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
         .background(GlassBackground())
+        // Other people's comments only exist on the server, so the local copy
+        // is a cache that has to be refreshed on open — otherwise this shows
+        // nothing but what this device typed.
+        .task { await engagementSync.loadComments(for: clip, context: modelContext) }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
     }
 
+    /// Sends the comment to the server, which is the only place it becomes
+    /// anyone else's. The draft is cleared straight away and `EngagementSync`
+    /// shows the comment optimistically, so the field empties on the same frame
+    /// as the tap; a failure removes the row again rather than leaving a
+    /// comment on screen that nobody else will ever load.
     private func post() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        clip.comments.append(ClipComment(authorName: "Ethan", text: text, sentAt: .now))
-        try? modelContext.save()
+        guard !text.isEmpty, !posting else { return }
         draft = ""
+        posting = true
+        Task {
+            await engagementSync.addComment(text, to: clip, context: modelContext)
+            posting = false
+        }
     }
 }
 
@@ -556,6 +591,9 @@ struct SharePlaceSheet: View {
     @State private var sentTo: Set<UUID> = []
     @State private var beaconPosted = false
     @State private var showPrivacyAlert = false
+    /// A send that never left the device. Surfaced rather than swallowed —
+    /// silently ticking "Sent" on a failure is the bug this whole path had.
+    @State private var shareFailed = false
 
     private var me: Friend? { friends.first { $0.isMe } }
     private var spotName: String { clip.spot?.name ?? clip.label }
@@ -626,6 +664,11 @@ struct SharePlaceSheet: View {
         } message: {
             Text("You must set your profile to Public to create or join community activities.")
         }
+        .alert("Couldn't share this place", isPresented: $shareFailed) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The message didn't send. Check your connection and try again.")
+        }
         .preferredColorScheme(.dark)
     }
 
@@ -636,7 +679,7 @@ struct SharePlaceSheet: View {
                 .foregroundStyle(Theme.textSecondary)
             ForEach(items) { chat in
                 Button {
-                    share(to: chat)
+                    Task { await share(to: chat) }
                 } label: {
                     HStack {
                         Text(chat.displayName)
@@ -659,15 +702,36 @@ struct SharePlaceSheet: View {
         }
     }
 
-    private func share(to chat: Chat) {
-        let message = Message(chat: chat, author: me,
-                              text: "check this spot out 👀",
-                              sharedSpotName: spotName)
-        // Carry the real spot so the chat card can open its detail sheet.
-        message.sharedSpot = clip.spot
-        modelContext.insert(message)
-        chat.messages.append(message)
-        try? modelContext.save()
+    /// Sends the place into the chat the friend actually reads.
+    ///
+    /// This used to be a bare SwiftData insert. That row is only ever drawn by
+    /// `MessageBubble` inside the legacy `MessageThreadView`, and every
+    /// signed-in session renders `StreamThreadView` instead — so the share
+    /// showed "Sent" here and arrived nowhere. It goes over the same channel
+    /// the thread itself opens now, exactly like a reaction does. The local
+    /// insert survives as the fallback for a session with no Stream user,
+    /// which is the only case that still renders the legacy thread.
+    private func share(to chat: Chat) async {
+        if StreamConfig.isEnabled {
+            guard let spot = clip.spot,
+                  await StreamThreadPoster.postSpotShare(spot, to: chat) else {
+                shareFailed = true
+                return
+            }
+            // A Stream message leaves no local `Message` row, so Pulse's
+            // outgoing order has to be told about it here.
+            chat.noteOutgoingMessage(at: .now)
+            try? modelContext.save()
+        } else {
+            let message = Message(chat: chat, author: me,
+                                  text: "check this spot out 👀",
+                                  sharedSpotName: spotName)
+            // Carry the real spot so the chat card can open its detail sheet.
+            message.sharedSpot = clip.spot
+            modelContext.insert(message)
+            chat.messages.append(message)
+            try? modelContext.save()
+        }
         sentTo.insert(chat.id)
     }
 
@@ -707,6 +771,13 @@ struct SpotDetailView: View {
     let spot: Spot
     @Environment(\.dismiss) private var dismiss
     @State private var showShare = false
+
+    /// Optional for the same reason `ClipView`'s `EngagementSync` is: this
+    /// sheet is also presented from the chat thread views (that's the
+    /// shared-place flow), and a missing `@Observable` lookup is a hard crash
+    /// rather than a nil. Without a router the strip simply isn't tappable,
+    /// which is what it was before.
+    @Environment(AppRouter.self) private var router: AppRouter?
 
     var body: some View {
         NavigationStack {
@@ -754,11 +825,27 @@ struct SpotDetailView: View {
                                     // Thumbnails aren't the focus of this sheet,
                                     // so video stays paused — it still shows its
                                     // first frame rather than a placeholder.
-                                    ClipMediaView(spotClip: clip, isActive: false)
-                                        .frame(width: 120, height: 180)
-                                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                                    // Shaped by the clip and fitted, so even a
+                                    // thumbnail shows the whole frame.
+                                    //
+                                    // Tapping one opens it in the Places feed
+                                    // proper rather than in a player built just
+                                    // for this sheet — same deep link a
+                                    // Highlights card and the bookmarks rail
+                                    // already use, so there is one way in.
+                                    Button { open(clip) } label: {
+                                        ClipMediaView(spotClip: clip, isActive: false,
+                                                      contentMode: .fit)
+                                            .frame(width: 120)
+                                            .aspectRatio(clip.displayAspectRatio, contentMode: .fit)
+                                            .background(Color.black)
+                                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                                            .contentShape(RoundedRectangle(cornerRadius: 14))
+                                    }
+                                    .buttonStyle(PressScaleStyle())
+                                    .disabled(router == nil)
                                     Text(clip.label)
-                                        .font(.caption2.weight(.semibold))
+                                        .font(.logCaption)
                                         .foregroundStyle(Theme.textPrimary)
                                         .lineLimit(1)
                                     Text("\(clip.authorName) · \(clip.capturedAt.relativeHour)")
@@ -797,5 +884,19 @@ struct SpotDetailView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    /// Closes this sheet and hands the Places tab the clip to land on.
+    ///
+    /// The sheet has to go first: it is presented *over* the tab bar, so
+    /// focusing a clip underneath it without dismissing would scroll a feed
+    /// nobody can see. Driving the shared `focusedPlaceClipId` rather than
+    /// opening another player here is what keeps one path into the feed —
+    /// `UserProfileView.openHighlight` and the bookmarks rail already use it.
+    private func open(_ clip: SpotClip) {
+        guard let router else { return }
+        router.tab = .places
+        router.focusedPlaceClipId = clip.id
+        dismiss()
     }
 }

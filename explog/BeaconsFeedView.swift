@@ -257,6 +257,29 @@ struct BeaconSegments: View {
     }
 }
 
+// MARK: - When it actually happens
+
+extension Beacon {
+    /// The start time as a date and a clock time.
+    ///
+    /// The counterpart to `BeaconCountdownChip`, which is purely relative. A
+    /// countdown answers "how soon", which is the urgency signal; it cannot
+    /// answer "which evening is this" — and until this existed, nothing in the
+    /// Beacons UI could, on the feed or on the detail sheet.
+    ///
+    /// Today and tomorrow are named rather than dated: most activities are
+    /// imminent, and "Sat, Jul 26" for something three hours away is a date the
+    /// reader has to convert before it means anything.
+    var startsAtLabel: String {
+        let calendar = Calendar.current
+        let time = startsAt.formatted(.dateTime.hour().minute())
+        if calendar.isDateInToday(startsAt) { return "Today · \(time)" }
+        if calendar.isDateInTomorrow(startsAt) { return "Tomorrow · \(time)" }
+        let day = startsAt.formatted(.dateTime.weekday(.abbreviated).month().day())
+        return "\(day) · \(time)"
+    }
+}
+
 // MARK: - Countdown chip
 
 /// A live countdown pill for a beacon's start time. Sunken/glass by default; when
@@ -391,6 +414,14 @@ struct BeaconFeedCard: View {
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.4), radius: 6, y: 1)
                     .lineLimit(1)
+                // When it actually happens, with the name rather than in the
+                // corner badge — the countdown chip up there says how soon, not
+                // which day, and the day is what decides whether you can go.
+                Label(beacon.startsAtLabel, systemImage: "calendar")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.4), radius: 5, y: 1)
+                    .lineLimit(1)
                 if let spot = beacon.spot {
                     Text("\(spot.category) · \(spot.distanceMiles, specifier: "%.1f") mi away")
                         .font(.system(size: 13, weight: .medium))
@@ -426,7 +457,14 @@ struct BeaconFeedCard: View {
     private var hostRow: some View {
         HStack(spacing: 10) {
             if let host = beacon.host {
+                // The "active" ring is painted *outside* the orb's own frame
+                // (negative padding in `GlassOrbAvatar`), so the orb still
+                // reports only 40×40 for layout and the ring's overflow lands
+                // outside whatever the parent clips to. Reserving the overflow
+                // here — rather than in `GlassOrbAvatar` — keeps every ringless
+                // orb elsewhere sized exactly as before.
                 GlassOrbAvatar(friend: host, size: 40, isActive: true)
+                    .padding(40 * 0.08)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(host.name)
                         .font(.system(size: 15, weight: .bold))
@@ -583,6 +621,33 @@ struct ActivityDetailSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    // When it happens, first thing on the page. This is the
+                    // "more details" view and it used to be the one screen that
+                    // never said when the activity was — you could read the
+                    // venue, the address, the distance, the description and the
+                    // whole guest list without learning the date.
+                    //
+                    // Outside the `spot` check below on purpose: a beacon with
+                    // no place attached still happens at a time.
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("WHEN")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Theme.textSecondary)
+                        HStack(spacing: 10) {
+                            Label(beacon.startsAtLabel, systemImage: "calendar")
+                                .font(.headline)
+                                .foregroundStyle(Theme.textPrimary)
+                            Spacer(minLength: 8)
+                            // The relative read stays alongside the absolute
+                            // one: "in 20 min" and "Today · 3:00 PM" answer
+                            // different questions.
+                            BeaconCountdownChip(startsAt: beacon.startsAt)
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background { GlassCard(cornerRadius: 16) { Color.clear } }
+
                     // Location metadata: venue, address, distance, description.
                     if let spot = beacon.spot {
                         HStack(spacing: 12) {
@@ -631,11 +696,19 @@ struct ActivityDetailSheet: View {
                                     profileFriend = friend
                                 } label: {
                                     VStack(spacing: 5) {
-                                        GlassOrbAvatar(friend: friend, size: 52, isActive: friend.id == beacon.host?.id)
+                                        // Same ring overflow as the header orb, and
+                                        // the horizontal `ScrollView` clips to the
+                                        // sizes its subviews report — so the host's
+                                        // ring needs the room reserved here or the
+                                        // scroll container cuts its edge off. Only
+                                        // the host pays for it; the rest stay tight.
+                                        let isHost = friend.id == beacon.host?.id
+                                        GlassOrbAvatar(friend: friend, size: 52, isActive: isHost)
+                                            .padding(isHost ? 52 * 0.08 : 0)
                                         Text(friend.name)
                                             .font(.caption.weight(.semibold))
                                             .foregroundStyle(Theme.textPrimary)
-                                        if friend.id == beacon.host?.id {
+                                        if isHost {
                                             Text("host")
                                                 .font(.system(size: 9, weight: .bold))
                                                 .foregroundStyle(Theme.accent)
@@ -926,6 +999,10 @@ struct NewActivitySheet: View {
     @State private var capacity = 8
     @State private var isPublic = true
     @State private var showPrivacyAlert = false
+    /// When the plan actually happens. Defaults to two hours out — the same
+    /// value this sheet used to hardcode into the `Beacon` initializer, so an
+    /// untouched picker creates exactly the beacon it always did.
+    @State private var startsAt: Date = .now.addingTimeInterval(3600 * 2)
 
     private var me: Friend? { friends.first { $0.isMe } }
 
@@ -962,6 +1039,14 @@ struct NewActivitySheet: View {
                 }
                 Section("Details") {
                     TextField("What's the plan?", text: $note, axis: .vertical)
+                    // The server clamps `startsAt` into [now - 1h, now + 30d],
+                    // so a past date would be silently pulled forward — the
+                    // lower bound here keeps the picker honest about that.
+                    DatePicker("Starts",
+                               selection: $startsAt,
+                               in: Date.now...,
+                               displayedComponents: [.date, .hourAndMinute])
+                        .tint(Theme.accent)
                     Stepper("Capacity: \(capacity)", value: $capacity, in: 2...50)
                     Toggle("Public activity", isOn: $isPublic)
                         .tint(Theme.accent)
@@ -1003,7 +1088,7 @@ struct NewActivitySheet: View {
             return
         }
         let beacon = Beacon(spot: selectedSpot, host: me, note: note,
-                            startsAt: .now.addingTimeInterval(3600 * 2), capacity: capacity)
+                            startsAt: startsAt, capacity: capacity)
         beacon.isPublic = isPublic
         beacon.hostUID = me.remoteUID
         beacon.hostName = me.name

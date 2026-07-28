@@ -385,12 +385,16 @@ private struct PulseCard: View {
     }
 
     var body: some View {
-        // Color.clear + aspectRatio pins the card to 16:9 at any width; the media
-        // fills it via the overlay so nothing letterboxes.
+        // The card takes the *clip's* shape, not a fixed 16:9. Pinning it to
+        // one ratio and filling meant a clip shot at any other shape was
+        // cropped to fit the card — the card was the thing being satisfied
+        // rather than the log. Sized from the clip, the media fits exactly and
+        // there is nothing to crop or letterbox.
         Color.clear
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .aspectRatio(cardAspectRatio, contentMode: .fit)
             .overlay {
                 ZStack {
+                    Color.black
                     media
                     scrim
                     overlayChrome
@@ -403,10 +407,18 @@ private struct PulseCard: View {
             )
     }
 
+    /// The card's shape: the clip's own when there is one, and the landscape
+    /// capture shape for an empty "no log this hour" slot, so a row of cards
+    /// stays a tidy grid rather than jumping between shapes where friends
+    /// happen to have logged.
+    private var cardAspectRatio: Double {
+        entry.clip?.displayAspectRatio ?? Clip.defaultAspectRatio
+    }
+
     @ViewBuilder
     private var media: some View {
         if let clip = entry.clip {
-            ClipView(clip: clip, isActive: true)
+            ClipView(clip: clip, isActive: true, contentMode: .fit)
                 .id(clip.id) // rebuild when the hour changes to a different clip
         } else {
             // "Nothing logged this hour" — still a card, so the wall stays legible.
@@ -444,7 +456,7 @@ private struct PulseCard: View {
                         .contentTransition(.numericText())
                     if !clip.label.isEmpty {
                         Text(clip.label)
-                            .font(.system(size: 17, weight: .semibold, design: .rounded))
+                            .font(.logCaption)
                             .foregroundStyle(.white)
                             .shadow(color: .black.opacity(0.45), radius: 5, y: 1)
                             .lineLimit(1)

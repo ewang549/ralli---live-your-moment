@@ -68,6 +68,16 @@ final class Friend {
     /// cannot host or join public activities (enforced by guard clauses).
     var isPrivate: Bool = false
 
+    /// Which push notifications this account wants, keyed by
+    /// `NotificationCategory.rawValue`.
+    ///
+    /// Only meaningful on the `isMe` row — it's this user's own setting, and
+    /// the copy the server actually checks lives on `users/{uid}`. A missing
+    /// key means on, so an empty dictionary (which is what every row written
+    /// before this existed has) is "notify me about everything", not silence.
+    /// Defaulted, so this stays a lightweight SwiftData migration.
+    var notificationPrefs: [String: Bool] = [:]
+
     /// A real profile photo, when one's been picked — takes over from the
     /// emoji/gradient orb everywhere an avatar renders. File name inside the
     /// app's Documents directory, same convention as `Clip.assetFileName`.
@@ -178,6 +188,26 @@ final class Chat {
     /// Nil means "never opened" — everything in the chat still counts as new.
     var lastReadAt: Date? = nil
 
+    /// When the current user last sent a *message* on this chat's Stream
+    /// channel. Defaulted → lightweight migration for older stores.
+    ///
+    /// Stored rather than derived because a Stream message never becomes a
+    /// local `Message` row: with real messaging on, `messages` only holds the
+    /// legacy offline path, so `lastSentByMeAt` would be blind to every text
+    /// you actually sent. `StreamThreadView`'s send recorder stamps this, and
+    /// backfills it from channel history when a thread is opened.
+    var lastOutgoingMessageAt: Date? = nil
+
+    /// When a *friend* last sent a message on this chat's Stream channel.
+    /// Defaulted → lightweight migration for older stores.
+    ///
+    /// The mirror image of `lastOutgoingMessageAt`, and stored for the same
+    /// reason: an incoming Stream message never becomes a local `Message` row
+    /// either, so nothing in the store used to record that a friend had texted
+    /// you. That left `lastActivityAt` — the signal both Pulse's order and the
+    /// unread dot read — able to see a friend's *log* but never their message.
+    var lastIncomingMessageAt: Date? = nil
+
     init(title: String? = nil, isGroup: Bool, members: [Friend], streak: Int = 0, lastSentAt: Date? = nil) {
         self.id = UUID()
         self.title = title
@@ -244,28 +274,109 @@ final class Chat {
 
     // MARK: - Read state (Pulse chat-row unread dot)
 
-    /// The most recent thing that happened here — a log, a message, or (for a
-    /// brand-new chat) just its creation. The single timestamp both the
-    /// unread dot and the message-list ordering key off of, so they never
-    /// disagree about what "most recent" means.
+    /// The most recent thing that happened here — a log, a message from either
+    /// side, or (for a brand-new chat) just its creation. The single timestamp
+    /// both the unread dot and the message-list ordering key off of, so they
+    /// never disagree about what "most recent" means.
+    ///
+    /// Both Stream stamps are folded in, not just the outgoing one. Clips reach
+    /// the store whoever filmed them, so this was always genuinely any-party
+    /// for logs — but for text it could only ever see the legacy local `Message`
+    /// rows plus my own Stream sends, which meant a friend texting you moved
+    /// nothing at all. See `lastIncomingMessageAt`.
     var lastActivityAt: Date {
         max(sortedClips.first?.capturedAt ?? .distantPast,
             messages.map(\.sentAt).max() ?? .distantPast,
+            lastIncomingMessageAt ?? .distantPast,
+            lastOutgoingMessageAt ?? .distantPast,
             createdAt)
     }
 
-    /// True when something's landed here since the current user last opened
+    /// Like `lastActivityAt`, but only counting what *I* sent — the last log I
+    /// posted here, the last message I wrote, whichever is newer. Nil when I've
+    /// never reached out in this thread.
+    ///
+    /// Kept for the surfaces that genuinely mean "when did I last reach out",
+    /// but Pulse's order no longer uses it: sorting on outgoing activity alone
+    /// meant a friend who sent you a log or a message and got no reply never
+    /// moved up the list. See `PulseEntry.byOutreach`.
+    var lastSentByMeAt: Date? {
+        [sortedClips.first { $0.author?.isMe == true }?.capturedAt,
+         messages.filter { $0.author?.isMe == true }.map(\.sentAt).max(),
+         lastOutgoingMessageAt]
+            .compactMap { $0 }
+            .max()
+    }
+
+    /// Records an outgoing Stream message at `sentAt`, keeping the newest.
+    /// Never moves the stamp backwards — history replayed on thread open
+    /// arrives out of order and must not undo a send that just happened.
+    func noteOutgoingMessage(at sentAt: Date) {
+        guard sentAt > (lastOutgoingMessageAt ?? .distantPast) else { return }
+        lastOutgoingMessageAt = sentAt
+    }
+
+    /// Records a friend's message at `sentAt`, keeping the newest. Same
+    /// monotonic rule as `noteOutgoingMessage`, and for the same reason:
+    /// channel history arrives out of order and must not walk the stamp back
+    /// over a message that landed a moment ago.
+    func noteIncomingMessage(at sentAt: Date) {
+        guard sentAt > (lastIncomingMessageAt ?? .distantPast) else { return }
+        lastIncomingMessageAt = sentAt
+    }
+
+    /// The most recent thing *someone else* did here — their log, their
+    /// message, whichever is newer. `.distantPast` when nothing has ever
+    /// arrived from the other side.
+    ///
+    /// Deliberately not `lastActivityAt` with a filter bolted on: that one is
+    /// any-party by design (see its comment) and floors at `createdAt`, both of
+    /// which are right for ordering and wrong for unread. A thread I have only
+    /// ever sent *into* has nothing to be unread, so this has no `createdAt`
+    /// floor and no outgoing terms at all.
+    var lastIncomingActivityAt: Date {
+        max(sortedClips.first { $0.author?.isMe != true }?.capturedAt ?? .distantPast,
+            messages.filter { $0.author?.isMe != true }.map(\.sentAt).max() ?? .distantPast,
+            lastIncomingMessageAt ?? .distantPast)
+    }
+
+    /// True when something *arrived* here since the current user last opened
     /// the thread. This is the one source of truth for the row's unread dot —
     /// set `lastReadAt` when the thread is opened and it clears immediately,
-    /// and stays cleared until genuinely new activity arrives.
+    /// and stays cleared until a friend sends something new.
     ///
-    /// A chat with no clips and no messages has nothing to be unread — without
-    /// this guard, `lastActivityAt` falls back to `createdAt`, which sits after
-    /// a fresh chat's nil `lastReadAt` and lit the dot the instant the chat
-    /// (often auto-created by the row's message button) came into existence.
+    /// Scoped to incoming activity rather than to `lastActivityAt`, because my
+    /// own sends move that too: `SendToFriendsView.send()` appends my clip to
+    /// the chat and never calls `markRead()`, so sending a log to a friend lit
+    /// their unread dot with no friend involved at all. Scoping the signal
+    /// fixes that everywhere at once — a future send path can't reintroduce the
+    /// bug by forgetting to mark the thread read.
+    ///
+    /// Both Stream stamps and the local rows matter here. A friend's text
+    /// writes neither a `Clip` nor a local `Message` — only
+    /// `lastIncomingMessageAt` — so a signal built from rows alone stayed dark
+    /// for the exact case the dot exists to announce.
     var hasUnread: Bool {
-        guard !clips.isEmpty || !messages.isEmpty else { return false }
-        return lastActivityAt > (lastReadAt ?? .distantPast)
+        lastIncomingActivityAt > (lastReadAt ?? .distantPast)
+    }
+
+    /// Whether anything has happened in this thread beyond it being created.
+    var hasActivity: Bool {
+        !clips.isEmpty || !messages.isEmpty
+            || lastIncomingMessageAt != nil || lastOutgoingMessageAt != nil
+    }
+
+    /// `lastActivityAt` for ordering: nil when the thread has only ever been
+    /// created and nothing has happened in it.
+    ///
+    /// `lastActivityAt` floors at `createdAt` so it can always answer with a
+    /// date, which is right for "how recent is this" but wrong as a sort key.
+    /// Threads get auto-created just by tapping a friend's message button, and
+    /// once the order leads on activity rather than on my own sends, that bare
+    /// creation timestamp would rank an empty thread opened by accident above
+    /// a friend you actually spoke to last week.
+    var lastRealActivityAt: Date? {
+        hasActivity ? lastActivityAt : nil
     }
 
     /// Call when the user opens this thread. Idempotent enough to call from
@@ -382,6 +493,33 @@ final class Clip {
     /// old one.
     var publishFailed: Bool = false
 
+    /// How many accounts other than the author have watched this log.
+    ///
+    /// A cache of `logs/{remoteID}.viewCount`. Unlike likes and comments, which
+    /// are scoped to public place posts, this is tracked for friends-only logs
+    /// too — a view is a view regardless of who it was addressed to, and this
+    /// is the number `LogInsightsView` reports back to the author.
+    var viewCount: Int = 0
+
+    /// Whether this log's audio is silenced on playback.
+    ///
+    /// A playback flag rather than a property of the file: the recording keeps
+    /// its audio track, so muting stays reversible and costs no export pass.
+    /// Only meaningful for `.video` — a photo has no audio to silence.
+    var isMuted: Bool = false
+
+    /// The media's displayed width ÷ height, measured once when the log was
+    /// created and stored so every surface can size its container to the real
+    /// shape of the shot *before* the asset loads.
+    ///
+    /// `AVAsset` only reports a natural size asynchronously, long after layout
+    /// has run, so resolving this at playback time would mean laying out
+    /// against a guess and popping to the right shape once the video arrived.
+    /// 0 means "unknown" — logs written before this field existed, and clips
+    /// synced from a friend on an older build — and every reader falls back to
+    /// its own default shape rather than dividing by zero.
+    var videoAspectRatio: Double = 0
+
     init(author: Friend?, chat: Chat?, capturedAt: Date, kind: ClipKind,
          assetFileName: String? = nil, label: String, emoji: String,
          hueA: Double, hueB: Double, reactions: [Reaction] = []) {
@@ -421,6 +559,21 @@ final class Clip {
         }
         return remoteURL
     }
+
+    /// The shape a container should be laid out in to show this log whole.
+    ///
+    /// `videoAspectRatio` when it was measured, and the landscape capture
+    /// shape otherwise. The fallback matters as much as the measurement: a
+    /// clip from an older build, or one synced from a friend still running
+    /// one, has no stored ratio, and a container sized from 0 would collapse.
+    /// Capture is landscape-only at the `.high` preset, so 16:9 is what those
+    /// clips almost certainly are.
+    var displayAspectRatio: Double {
+        videoAspectRatio > 0 ? videoAspectRatio : Clip.defaultAspectRatio
+    }
+
+    /// See `displayAspectRatio` — the shape assumed for an unmeasured clip.
+    static let defaultAspectRatio: Double = 16.0 / 9.0
 
     /// Whether this clip's media has reached the server.
     var isPublished: Bool { !remoteID.isEmpty }
@@ -539,10 +692,56 @@ final class Spot {
 }
 
 /// A comment left on a place clip in the reels feed.
+///
+/// Mirrors `logs/{logId}/comments/{id}` on the server. It carries the author's
+/// real account uid and denormalised identity, which is what makes a comment
+/// attributable at all — before there was a backend for this, a comment was an
+/// unattributed string that existed only on the device that typed it.
 struct ClipComment: Codable, Hashable {
+    /// `logs/{logId}/comments/{id}`. Empty for a comment still in flight, which
+    /// is how the optimistic insert is told apart from the server's copy.
+    var remoteID: String = ""
+    /// The commenter's account uid. Empty only for rows written before this
+    /// existed. Needed for any blocking or moderation decision downstream.
+    var authorUID: String = ""
     var authorName: String
+    var authorAvatarEmoji: String = ""
+    var authorAvatarURL: String = ""
     var text: String
     var sentAt: Date
+
+    init(remoteID: String = "",
+         authorUID: String = "",
+         authorName: String,
+         authorAvatarEmoji: String = "",
+         authorAvatarURL: String = "",
+         text: String,
+         sentAt: Date) {
+        self.remoteID = remoteID
+        self.authorUID = authorUID
+        self.authorName = authorName
+        self.authorAvatarEmoji = authorAvatarEmoji
+        self.authorAvatarURL = authorAvatarURL
+        self.text = text
+        self.sentAt = sentAt
+    }
+
+    /// Decoded field by field rather than by the synthesized initialiser.
+    ///
+    /// A synthesized `init(from:)` throws on a missing key *even when the
+    /// property has a default value*, so adding a field to this struct would
+    /// fail to decode every comment already stored — and because these live as
+    /// an encoded array on `SpotClip`, one bad row loses the whole thread.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        remoteID = try container.decodeIfPresent(String.self, forKey: .remoteID) ?? ""
+        authorUID = try container.decodeIfPresent(String.self, forKey: .authorUID) ?? ""
+        authorName = try container.decodeIfPresent(String.self, forKey: .authorName) ?? ""
+        authorAvatarEmoji = try container.decodeIfPresent(String.self, forKey: .authorAvatarEmoji) ?? ""
+        authorAvatarURL = try container.decodeIfPresent(String.self, forKey: .authorAvatarURL) ?? ""
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        sentAt = try container.decodeIfPresent(Date.self, forKey: .sentAt) ?? .now
+    }
 }
 
 /// A 3-second ambient tag someone recorded at a spot.
@@ -589,9 +788,18 @@ final class SpotClip {
     var hueA: Double
     var hueB: Double
     var capturedAt: Date
-    // Reels-feed engagement state.
+    /// The media's displayed width ÷ height. Mirrors `Clip.videoAspectRatio`
+    /// for the Places feed — the same "show the whole frame, never crop it"
+    /// rule applies here, and a place card needs the shape for the same
+    /// reason a log card does. 0 means unknown; see `displayAspectRatio`.
+    var videoAspectRatio: Double = 0
+    // Reels-feed engagement state. Server-owned since likes and comments got a
+    // backend: these are a cache of `logs/{remoteID}`'s counters, not the truth.
     var likeCount: Int = 0
     var likedByMe: Bool = false
+    /// How many accounts other than the author have watched this. Defaulted, so
+    /// this is a lightweight SwiftData migration.
+    var viewCount: Int = 0
     /// Bookmarked from the Places rail. Defaulted, so this is a lightweight
     /// SwiftData migration for stores written before the rail existed.
     var savedByMe: Bool = false
@@ -625,6 +833,12 @@ final class SpotClip {
     /// Media in Storage, once published or downloaded.
     var remoteURL: URL? {
         remoteURLString.isEmpty ? nil : URL(string: remoteURLString)
+    }
+
+    /// The shape a container should be laid out in to show this clip whole.
+    /// See `Clip.displayAspectRatio` — same rule, same fallback.
+    var displayAspectRatio: Double {
+        videoAspectRatio > 0 ? videoAspectRatio : Clip.defaultAspectRatio
     }
 }
 

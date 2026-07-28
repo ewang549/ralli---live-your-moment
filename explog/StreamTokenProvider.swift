@@ -40,6 +40,42 @@ enum StreamTokenProvider {
     /// latter case since adding yourself requires already being a member.
     private static let joinChannelEndpoint = URL(string: "https://us-central1-explog-723b7.cloudfunctions.net/joinStreamChannel")!
 
+    /// Channels this user has already been joined to during this session.
+    ///
+    /// Joining is idempotent server-side, but it isn't free: every call mints a
+    /// Firebase ID token and round-trips a secret-bound Cloud Function. Reacting
+    /// to a log and re-opening a thread both went through it *every time*, which
+    /// is the bulk of the delay before a message actually sends. Membership
+    /// can't be lost while signed in, so once a join succeeds the rest of the
+    /// session can skip straight to sending.
+    ///
+    /// Keyed by `uid/channelId` so signing into a different account on the same
+    /// launch can't inherit the previous user's membership.
+    private static var joinedChannels: Set<String> = []
+
+    private static func joinKey(_ channelId: String, uid: String) -> String { "\(uid)/\(channelId)" }
+
+    /// True when `channelId` was already joined by the current user this session.
+    static func hasJoined(_ channelId: String) -> Bool {
+        guard let uid = Auth.auth().currentUser?.uid else { return false }
+        return joinedChannels.contains(joinKey(channelId, uid: uid))
+    }
+
+    /// Drops cached membership. Call on sign-out so the next user re-joins.
+    static func resetJoinedChannels() {
+        joinedChannels.removeAll()
+    }
+
+    /// Joins `channelId` unless this session already did.
+    ///
+    /// Failures are *not* cached — a join that threw leaves the channel absent
+    /// from the set, so the next attempt retries rather than silently sending
+    /// into a channel the user may not be a member of.
+    static func joinChannelIfNeeded(channelId: String, otherMemberIds: [String], name: String?) async throws {
+        guard !hasJoined(channelId) else { return }
+        try await joinChannel(channelId: channelId, otherMemberIds: otherMemberIds, name: name)
+    }
+
     static func joinChannel(channelId: String, otherMemberIds: [String], name: String?) async throws {
         guard let user = Auth.auth().currentUser else { return }
         let idToken = try await user.getIDToken()

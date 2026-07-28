@@ -70,7 +70,11 @@ private struct SoloLogPage: View {
             } else {
                 TabView(selection: $clipIndex) {
                     ForEach(Array(clips.enumerated()), id: \.element.id) { index, clip in
-                        ClipView(clip: clip, isActive: isActive && index == clipIndex)
+                        // `.fit` over black, like every other surface that
+                        // shows a log: the whole frame is always visible, and a
+                        // portrait page never crops a landscape capture.
+                        ClipView(clip: clip, isActive: isActive && index == clipIndex,
+                                 contentMode: .fit)
                             .tag(index)
                     }
                 }
@@ -180,7 +184,7 @@ private struct LogOverlay: View {
             }
             HStack {
                 Text(clip.label)
-                    .font(.subheadline.weight(.medium))
+                    .font(.logCaption)
                     .foregroundStyle(.white)
                 Spacer()
                 if chat.streak > 0 {
@@ -381,7 +385,7 @@ private struct GroupLogPage: View {
                     .foregroundStyle(Theme.textSecondary)
             } else {
                 let clip = clips[min(reelIndex, clips.count - 1)]
-                ClipView(clip: clip, isActive: isActive)
+                ClipView(clip: clip, isActive: isActive, contentMode: .fit)
                     .id(clip.id)
                     .transition(.opacity)
                     .ignoresSafeArea()
@@ -430,7 +434,11 @@ private struct GridCell: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            ClipView(clip: clip, isActive: isActive)
+            // The cell takes the clip's own shape rather than an arbitrary
+            // square, so the frame is shown whole with no bars that don't line
+            // up with its real edges.
+            Color.black
+            ClipView(clip: clip, isActive: isActive, contentMode: .fit)
             LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 2) {
                 Text(clip.author?.name ?? "")
@@ -446,7 +454,7 @@ private struct GridCell: View {
             }
             .padding(10)
         }
-        .frame(height: 330)
+        .aspectRatio(clip.displayAspectRatio, contentMode: .fit)
         .clipped()
     }
 }

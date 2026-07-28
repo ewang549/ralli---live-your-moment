@@ -2,60 +2,63 @@ import SwiftUI
 
 // MARK: - Hourly cadence banner ("Life, on the hour")
 
-/// A live countdown to the top of the next hour — the next window to post a log.
-/// A coral progress ring fills as the hour elapses; the copy frames the action
-/// ("Next log in 23:14"), and the trailing capture button posts. When the hour
-/// flips the whole card gives a brief coral pulse and nudges a capture; once the
-/// user has posted this hour it settles into a satisfied "logged" state.
+/// Whether this hour's log is still owed or already sent — a status line, not a
+/// countdown. The state is carried by one icon and one label: a coral record
+/// dot while the hour is open, a mint checkmark once you've posted. When the
+/// hour flips the whole card gives a brief coral pulse.
 ///
-/// Tapping the body opens the synced hourly wall. The card no longer carries
-/// its own capture button — the bottom tab bar's center camera is the one
-/// entry point into capture, so this card is a status readout you tap into,
-/// not a second way to raise the shutter.
+/// There is deliberately no clock on this control. A ticking "next log in
+/// 23:14" turned the hour into a deadline being counted down at you; what
+/// matters is only whether you're on the board yet, which is a two-state
+/// question the icon already answers.
+///
+/// The status side is inert; only the trailing button does anything, and it
+/// opens the day's recap. Neither raises the shutter — the tab bar's centre
+/// camera stays the one entry point into capture.
 struct HourlyCadenceBanner: View {
     /// True when the user has already posted a log during the current clock hour.
     let postedThisHour: Bool
-    let onOpenHour: () -> Void
 
     @State private var flipPulse = false
+    @State private var showDailyVlog = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             banner(now: context.date)
         }
+        .fullScreenCover(isPresented: $showDailyVlog) {
+            DailyVlogView()
+        }
     }
 
     private func banner(now: Date) -> some View {
-        let cal = Calendar.current
-        let nextHour = cal.nextDate(after: now,
-                                    matching: DateComponents(minute: 0, second: 0),
-                                    matchingPolicy: .nextTime) ?? now
-        let remaining = max(0, nextHour.timeIntervalSince(now))
-        let fraction = min(1, max(0, (3600 - remaining) / 3600))
-        let minutesLeft = max(1, Int(ceil(remaining / 60)))
-        let hourBucket = cal.component(.hour, from: now)
+        // The hour is still tracked, but only to fire the flip pulse — nothing
+        // on the card reads the remaining time any more.
+        let hourBucket = Calendar.current.component(.hour, from: now)
 
-        return Button(action: onOpenHour) {
+        return HStack(spacing: 12) {
+            // The status readout. Inert: it reports whether this hour is on the
+            // board and nothing more. It used to open the hourly wall, which
+            // made most of the card a hidden navigation target — the recap
+            // button is the only thing here that goes anywhere now.
             HStack(spacing: 14) {
-                progressRing(fraction: fraction, minutesLeft: minutesLeft)
+                statusIcon
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title(remaining: remaining))
-                        .font(.system(size: 16, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Theme.textPrimary)
-                        .contentTransition(.numericText())
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Text(subtitle)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.textSecondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 4)
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Spacer(minLength: 0)
             }
-            .contentShape(Rectangle())
+            // One element, not two: without `.ignore` the icon and the label
+            // are read separately, so VoiceOver says the status twice and lands
+            // on a decorative glyph. No `.isButton` trait — it isn't one.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+
+            recapButton
         }
-        .buttonStyle(.plain)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background {
@@ -74,43 +77,45 @@ struct HourlyCadenceBanner: View {
         .onChange(of: hourBucket) { _, _ in celebrateFlip() }
     }
 
-    private func progressRing(fraction: Double, minutesLeft: Int) -> some View {
+    /// The whole state of the card in one glyph: a mint checkmark once you've
+    /// posted, a coral record dot while the hour is still open. The ring is a
+    /// plain disc now — its old trim tracked the elapsed fraction of the hour,
+    /// which was the countdown wearing a different shape.
+    private var statusIcon: some View {
         let tint = postedThisHour ? Theme.mint : Theme.accent
         return ZStack {
-            Circle().stroke(tint.opacity(0.16), lineWidth: 5)
-            Circle()
-                .trim(from: 0, to: postedThisHour ? 1 : fraction)
-                .stroke(tint, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.easeInOut(duration: 0.4), value: fraction)
-
-            if postedThisHour {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(Theme.mint)
-            } else {
-                VStack(spacing: -1) {
-                    Text("\(minutesLeft)")
-                        .font(.system(size: 17, weight: .heavy, design: .rounded).monospacedDigit())
-                        .foregroundStyle(Theme.textPrimary)
-                        .contentTransition(.numericText())
-                    Text("min")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-            }
+            Circle().fill(tint.opacity(0.14))
+            Circle().strokeBorder(tint.opacity(0.35), lineWidth: 2)
+            Image(systemName: postedThisHour ? "checkmark" : "record.circle")
+                .font(.system(size: 19, weight: .bold))
+                .foregroundStyle(tint)
         }
-        .frame(width: 50, height: 50)
+        .frame(width: 44, height: 44)
+        .animation(.easeInOut(duration: 0.25), value: postedThisHour)
     }
 
-    private func title(remaining: TimeInterval) -> String {
-        if postedThisHour { return "Logged this hour" }
-        return "Next log in \(cooldownString(remaining))"
+    /// The day's recap, one tap from the status it summarises.
+    private var recapButton: some View {
+        Button { showDailyVlog = true } label: {
+            Image(systemName: "film.stack")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 42, height: 42)
+                .background {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Theme.accentWash)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Theme.accent.opacity(0.28), lineWidth: 1)
+                        }
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Daily recap")
     }
 
-    private var subtitle: String {
-        postedThisHour ? "You're on the board — next hour opens soon"
-                       : "Ralli runs on the hour. Post yours."
+    private var title: String {
+        postedThisHour ? "Logged for this hour" : "Send your Log for the hour"
     }
 
     private func celebrateFlip() {

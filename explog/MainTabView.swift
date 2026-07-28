@@ -59,6 +59,11 @@ struct MainTabView: View {
     /// Beacon publish/sync. Owned here for the same reason as the two above:
     /// the feed, the create sheet and the detail sheet all act on one copy.
     @State private var beaconSync = BeaconSync()
+    /// Likes, comments and view counts. Owned here for the same reason as the
+    /// rest: the reels feed, the comments sheet and the insights screen all act
+    /// on one copy, and the per-session "already counted this view" set has to
+    /// outlive any single feed.
+    @State private var engagementSync = EngagementSync()
     /// Push registration + the destination of a tapped notification.
     @State private var push = PushNotifications.shared
     @State private var showNotificationPrimer = false
@@ -91,6 +96,11 @@ struct MainTabView: View {
         // than on one screen, because the capture flow can dismiss you onto
         // any tab.
         .overlay(alignment: .top) { sendFailureBanner }
+        // Watches every channel you're in, not just an open thread, so a
+        // friend's message reaches Pulse's order and the unread dot even when
+        // you're nowhere near the conversation. Attached here because this view
+        // outlives every tab and sheet below it.
+        .watchesIncomingMessages()
         .animation(.spring(response: 0.32, dampingFraction: 0.86),
                    value: logSync.lastPublishError)
         .environment(router)
@@ -98,6 +108,7 @@ struct MainTabView: View {
         .environment(logSync)
         .environment(followGraph)
         .environment(beaconSync)
+        .environment(engagementSync)
         // Notification priming, once, on the first run that reaches the app.
         //
         // Deliberately here and not at the end of onboarding: the auth gate can
@@ -134,6 +145,18 @@ struct MainTabView: View {
                     router.showCapture = false
                 }
             }
+        }
+        // Turning the phone end-for-end between the two landscape edges. The
+        // camera pins one specific interface orientation — that's what makes it
+        // rotate even with the phone's rotation lock engaged — so nothing points
+        // it at the new edge unless we ask. There's no layout signal to lean on
+        // either: the screen is exactly the same size on both edges.
+        //
+        // Ignored once media is captured, since the Preview/Send flow is
+        // deliberately portrait and re-asserting landscape would fight it.
+        .onChange(of: orientation.landscapeEdge) { _, edge in
+            guard edge != nil, router.showCapture, !router.isPreviewActive else { return }
+            InterfaceOrientationLock.lockLandscape()
         }
         .task {
             orientation.start()

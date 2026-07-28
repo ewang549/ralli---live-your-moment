@@ -53,14 +53,27 @@ struct SendToFriendsView: View {
     }
 
     @State private var selected: Set<UUID> = []
-    @State private var label: String
 
-    /// `initialLabel` seeds the caption from any text added on the review screen.
-    init(media: CapturedMedia, initialLabel: String = "", logSync: LogSync, onSent: @escaping () -> Void) {
+    /// The caption typed on the review screen. A plain `let`, not `@State`:
+    /// this screen shows it and does not edit it. Captioning lives on
+    /// `PostCaptureReview`, where the text sits under the hour stamp over the
+    /// actual shot — so what you type is composed against the frame it will be
+    /// read on. Back returns there to change it.
+    let label: String
+    /// The capture's real shape, so the preview is the log's shape rather than
+    /// a fixed box that letterboxes it. See `Clip.videoAspectRatio`.
+    let aspectRatio: Double
+    /// Carried onto the clip so the recipient's player honours it.
+    let isMuted: Bool
+
+    init(media: CapturedMedia, initialLabel: String = "", aspectRatio: Double = 0,
+         isMuted: Bool = false, logSync: LogSync, onSent: @escaping () -> Void) {
         self.media = media
+        self.label = initialLabel
+        self.aspectRatio = aspectRatio
+        self.isMuted = isMuted
         self.logSync = logSync
         self.onSent = onSent
-        _label = State(initialValue: initialLabel)
     }
 
     @State private var emoji = "✨"
@@ -71,19 +84,18 @@ struct SendToFriendsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                LogPreviewCard(media: media, label: label, emoji: emoji, hueA: hueA)
+                // Exactly what gets sent: the media at its own shape, with the
+                // hour stamp and caption drawn over it the way every feed will
+                // draw them. Read-only on purpose — this screen answers "who
+                // gets this", and showing an editable field here is what let
+                // the caption be one thing while composing and another by the
+                // time it went out.
+                LogPreviewCard(media: media, label: label, emoji: emoji, hueA: hueA,
+                               aspectRatio: aspectRatio, isMuted: isMuted)
 
                 if media.kind == .vibe {
                     VibeEmojiComposer(emoji: $emoji, hueA: $hueA)
                 }
-
-                TextField("What are you up to?", text: $label)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Capsule().fill(Theme.baseRaised))
-                    .foregroundStyle(Theme.textPrimary)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
 
                 List {
                     Section("Send to") {
@@ -168,7 +180,9 @@ struct SendToFriendsView: View {
     }
 
     private func send() {
-        let finalLabel = label.isEmpty ? "right now" : label
+        // An untyped caption stays empty — every surface that draws one already
+        // skips the overlay for an empty string, so there is nothing to fill in.
+        let finalLabel = label
         let calendar = Calendar.current
         var created: [Clip] = []
         /// Everyone the published copy is actually addressed to, gathered as the
@@ -183,6 +197,10 @@ struct SendToFriendsView: View {
             let clip = Clip(author: me, chat: chat, capturedAt: .now, kind: media.kind,
                             assetFileName: media.assetFileName, label: finalLabel, emoji: emoji,
                             hueA: hueA, hueB: (hueA + 0.15).truncatingRemainder(dividingBy: 1))
+            // Both measured on the review screen: the shape every surface sizes
+            // its container to, and whether the recipient hears this.
+            clip.videoAspectRatio = aspectRatio
+            clip.isMuted = isMuted
             modelContext.insert(clip)
             created.append(clip)
             chat.clips.append(clip)
@@ -278,9 +296,19 @@ struct PublicPlacePostView: View {
     @State private var emoji = "✨"
     @State private var hueA = Double.random(in: 0...1)
 
-    /// `initialName` seeds the name from any text added on the review screen.
-    init(media: CapturedMedia, initialName: String = "", logSync: LogSync, onSent: @escaping () -> Void) {
+    /// See `SendToFriendsView` — same two fields, same reasons.
+    let aspectRatio: Double
+    let isMuted: Bool
+
+    /// `initialName` seeds the name from the caption typed on the review
+    /// screen. Editable here, unlike the friends picker's caption: a place
+    /// post's name is a different thing from a log's caption — it titles the
+    /// post on the place's feed — so this screen is where it belongs.
+    init(media: CapturedMedia, initialName: String = "", aspectRatio: Double = 0,
+         isMuted: Bool = false, logSync: LogSync, onSent: @escaping () -> Void) {
         self.media = media
+        self.aspectRatio = aspectRatio
+        self.isMuted = isMuted
         self.logSync = logSync
         self.onSent = onSent
         _name = State(initialValue: initialName)
@@ -295,7 +323,8 @@ struct PublicPlacePostView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                LogPreviewCard(media: media, label: name, emoji: emoji, hueA: hueA)
+                LogPreviewCard(media: media, label: name, emoji: emoji, hueA: hueA,
+                               aspectRatio: aspectRatio, isMuted: isMuted)
 
                 if media.kind == .vibe {
                     VibeEmojiComposer(emoji: $emoji, hueA: $hueA)
@@ -413,7 +442,8 @@ struct PublicPlacePostView: View {
     /// public sync updates that row instead of adding a duplicate.
     private func post() {
         guard let spot, !spot.remoteID.isEmpty else { return }
-        let finalLabel = name.isEmpty ? "right now" : name
+        // Same as a friends-only log: no caption means no caption.
+        let finalLabel = name
         let hueB = (hueA + 0.15).truncatingRemainder(dividingBy: 1)
 
         let clip = Clip(author: me, chat: nil, capturedAt: .now, kind: media.kind,
@@ -422,6 +452,8 @@ struct PublicPlacePostView: View {
         // Recorded for both audiences: the place is where this was filmed, and
         // that stays true whoever ends up seeing it.
         clip.intendedSpotID = spot.remoteID
+        clip.videoAspectRatio = aspectRatio
+        clip.isMuted = isMuted
         modelContext.insert(clip)
 
         var spotClip: SpotClip?
@@ -443,6 +475,9 @@ struct PublicPlacePostView: View {
             // waiting for the public feed to sync your own log back to you.
             mirror.authorAvatarURL = me?.avatarURL ?? ""
             mirror.authorAvatarEmoji = me?.emoji ?? ""
+            // Same measurement as the `Clip` above, so the Places feed sizes
+            // its cards to the real shape rather than guessing.
+            mirror.videoAspectRatio = aspectRatio
             modelContext.insert(mirror)
             spotClip = mirror
         }
@@ -468,19 +503,56 @@ struct PublicPlacePostView: View {
 
 // MARK: - Shared composer pieces
 
-/// The capture, previewed at the top of whichever share screen you're on.
+/// The log exactly as it will be sent, previewed at the top of whichever share
+/// screen you're on: the media whole, at its own shape, with the hour stamp and
+/// caption over it.
+///
+/// Read-only by design. This is a confirmation of what the review screen
+/// composed, not a second place to compose it — the caption is drawn here in
+/// the same type the feeds use, so what you see is what lands.
 private struct LogPreviewCard: View {
     let media: CapturedMedia
     let label: String
     let emoji: String
     let hueA: Double
+    /// The capture's measured width ÷ height. 0 when it couldn't be read, in
+    /// which case the card falls back to the landscape capture shape.
+    var aspectRatio: Double = 0
+    var isMuted: Bool = false
+
+    private var ratio: Double {
+        aspectRatio > 0 ? aspectRatio : Clip.defaultAspectRatio
+    }
 
     var body: some View {
         preview
-            .frame(height: 210)
+            // Shaped by the media rather than pinned to a fixed height, so the
+            // card *is* the log's shape and there are no bars that don't line
+            // up with the frame's real edges.
+            .aspectRatio(ratio, contentMode: .fit)
+            .frame(maxHeight: 260)
             .clipShape(RoundedRectangle(cornerRadius: 20))
+            .overlay(stampBlock)
             .padding(.horizontal, 20)
             .padding(.top, 8)
+    }
+
+    /// The hour banner with the caption beneath it — the same two-line block,
+    /// in the same order and type, that `PostCaptureReview` composes against.
+    private var stampBlock: some View {
+        VStack(spacing: 6) {
+            HourOverlay(date: .now)
+            if !label.isEmpty {
+                Text(label)
+                    .font(.logCaptionCompact)
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .shadow(color: .black.opacity(0.55), radius: 6, y: 1)
+                    .padding(.horizontal, 20)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -493,8 +565,17 @@ private struct LogPreviewCard: View {
             let clip = Clip(author: nil, chat: nil, capturedAt: .now, kind: media.kind,
                             assetFileName: media.assetFileName, label: label, emoji: emoji,
                             hueA: hueA, hueB: hueA)
-            ClipView(clip: clip)
+            // `.fit` inside a card already cut to the media's own ratio, so the
+            // frame is shown whole with nothing to letterbox against.
+            ClipView(clip: muted(clip), contentMode: .fit)
         }
+    }
+
+    /// The preview honours the mute toggle, so silencing a log is audible (or
+    /// rather, inaudible) before it is sent rather than only on arrival.
+    private func muted(_ clip: Clip) -> Clip {
+        clip.isMuted = isMuted
+        return clip
     }
 }
 

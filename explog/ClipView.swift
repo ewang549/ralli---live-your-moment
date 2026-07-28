@@ -18,6 +18,11 @@ struct ClipView: View {
     /// surface that plays a clip on its own rather than in a synced stack.
     var restartToken: Int = 0
 
+    /// Optional so this view still works where the sync layer isn't in scope —
+    /// the capture and review flow renders clips before `MainTabView`'s
+    /// environment is in play, and a preview has no environment at all.
+    @Environment(EngagementSync.self) private var engagementSync: EngagementSync?
+
     var body: some View {
         ClipMediaView(kind: clip.kind,
                       localURL: clip.assetURL,
@@ -28,8 +33,22 @@ struct ClipView: View {
                       hueB: clip.hueB,
                       isActive: isActive,
                       contentMode: contentMode,
+                      isMuted: clip.isMuted,
                       restartToken: restartToken)
+            // Counted here rather than at each of the dozen call sites, because
+            // this is the one place that already knows both *which* clip and
+            // whether it's the one actually being watched. A pane built ahead
+            // of the visible one to make paging smooth is inactive, so it
+            // doesn't count; the author's own views are dropped server-side.
+            .task(id: viewToken) {
+                guard isActive, !clip.remoteID.isEmpty else { return }
+                engagementSync?.markViewed(logID: clip.remoteID)
+            }
     }
+
+    /// Re-runs the count when either the clip or its active state changes — a
+    /// recycled pane swapped onto a different clip is a different view.
+    private var viewToken: String { "\(clip.remoteID)-\(isActive)" }
 }
 
 /// The media-resolution ladder, expressed over plain values rather than a model:
@@ -53,6 +72,9 @@ struct ClipMediaView: View {
     let hueB: Double
     var isActive: Bool = true
     var contentMode: ContentMode = .fill
+    /// Silences the video on playback. Carried from `Clip.isMuted`; ignored by
+    /// the photo and vibe branches, which have no audio to begin with.
+    var isMuted: Bool = false
     /// See `LoopingVideoView.restartToken`. Only a synced stack sets this.
     var restartToken: Int = 0
 
@@ -75,6 +97,7 @@ struct ClipMediaView: View {
                         LoopingVideoView(url: url,
                                          isPlaying: isActive,
                                          contentMode: contentMode,
+                                         isMuted: isMuted,
                                          restartToken: restartToken)
                     } else {
                         vibeBody
@@ -161,6 +184,9 @@ struct LoopingVideoView: UIViewRepresentable {
     /// `.fill` crops to the container (the feed look); `.fit` letterboxes, so a
     /// landscape capture keeps its framing on a portrait screen.
     var contentMode: ContentMode = .fill
+    /// Silences this player. A playback flag, not an edit — the file keeps its
+    /// audio track, so toggling this back restores the sound with no re-encode.
+    var isMuted: Bool = false
     /// Bumped by the feed's `ClipSyncClock` to restart every pane in lockstep.
     ///
     /// The stack used to synchronize by putting the clock's cycle in the view's
@@ -188,11 +214,16 @@ struct LoopingVideoView: UIViewRepresentable {
         // pane keeps playing whatever it loaded first — a previous clip's video
         // frozen under a new caption and author.
         if uiView.currentURL != url {
-            uiView.configure(url: url, videoGravity: videoGravity, restartToken: restartToken)
+            uiView.configure(url: url, videoGravity: videoGravity,
+                             isMuted: isMuted, restartToken: restartToken)
         } else {
             uiView.setVideoGravity(videoGravity)
             uiView.restartIfNeeded(token: restartToken)
         }
+        // Outside the reuse branch on purpose: the review screen toggles mute
+        // on a player that is already loaded and playing, so applying it only
+        // on configure would leave the toggle silent until the next clip.
+        uiView.setMuted(isMuted)
         uiView.setPlaying(isPlaying)
     }
 
@@ -208,6 +239,11 @@ struct LoopingVideoView: UIViewRepresentable {
         /// asynchronously now, so `setPlaying` can land before there's a player
         /// to tell — this is what the new player reads when it appears.
         private var wantsPlaying = false
+        /// Whether the caller wants this silenced. Held here for the same
+        /// reason as `wantsPlaying`: `configure` finishes asynchronously, so
+        /// the flag has to outlive the gap and be read by the player that
+        /// eventually arrives.
+        private var wantsMuted = false
         /// The last sync-clock cycle this view restarted on, so a repeated
         /// `updateUIView` for the same cycle doesn't keep seeking to zero.
         private var restartToken = 0
@@ -225,9 +261,11 @@ struct LoopingVideoView: UIViewRepresentable {
         /// frame lands on screen.
         func configure(url: URL,
                        videoGravity: AVLayerVideoGravity = .resizeAspectFill,
+                       isMuted: Bool = false,
                        restartToken: Int = 0) {
             playerLayer.videoGravity = videoGravity
             currentURL = url
+            wantsMuted = isMuted
             // A fresh load starts at zero by definition, so adopt the caller's
             // cycle rather than seeking on the next update for a restart that
             // has effectively already happened.
@@ -241,7 +279,13 @@ struct LoopingVideoView: UIViewRepresentable {
             player = nil
             playerLayer.player = nil
 
-            let asset = AVURLAsset(url: url)
+            // A clip already pulled down once plays from disk; anything else
+            // streams exactly as before while a copy is fetched in the
+            // background for next time. Caching never delays first playback.
+            let playbackURL = VideoCache.shared.cachedFile(for: url) ?? url
+            if playbackURL == url { VideoCache.shared.warm(url) }
+
+            let asset = AVURLAsset(url: playbackURL)
             Task { @MainActor [weak self] in
                 _ = try? await asset.load(.duration, .tracks)
                 // The pane may have been recycled onto a different clip while
@@ -253,7 +297,7 @@ struct LoopingVideoView: UIViewRepresentable {
 
         private func install(asset: AVURLAsset, videoGravity: AVLayerVideoGravity) {
             let player = AVQueuePlayer()
-            player.isMuted = false
+            player.isMuted = wantsMuted
             // These are short local clips that loop continuously: waiting to
             // build a buffer is exactly the stall that shows as a black frame
             // at the seam. Play what's there.
@@ -284,6 +328,11 @@ struct LoopingVideoView: UIViewRepresentable {
             guard let player else { return }
             player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
             if wantsPlaying { player.play() }
+        }
+
+        func setMuted(_ muted: Bool) {
+            wantsMuted = muted
+            player?.isMuted = muted
         }
 
         func setPlaying(_ playing: Bool) {

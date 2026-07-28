@@ -136,6 +136,9 @@ struct ChatDrawerView: View {
             chat.markRead()
             try? modelContext.save()
         }
+        // …and anything sent from it is me reaching out, which is what Pulse
+        // orders on.
+        .recordsOutgoingSends(to: chat)
     }
 }
 
@@ -196,6 +199,71 @@ struct ChatDetailView: View {
                 chat.markRead()
                 try? modelContext.save()
             }
+            .recordsOutgoingSends(to: chat)
+    }
+}
+
+// MARK: - Swipe-right-to-dismiss
+
+/// Gives a modally-presented thread the swipe-back gesture a pushed one gets
+/// for free.
+///
+/// `ChatDetailView` is reached two ways. From the Pulse list it is *pushed*
+/// onto a `NavigationStack`, so UIKit's interactive pop handles this and
+/// nothing here is needed. From Pulse's quick-chat and a profile's message
+/// button it is presented in a `.fullScreenCover` as the root of its own
+/// stack — a cover has no dismiss gesture at all, and a root has no "back" to
+/// swipe to, which left the ✕ as the only way out.
+///
+/// Two gestures rather than one: the container gesture is attached with
+/// `.gesture`, so any child that wants the drag first — the message list's own
+/// scrolling, the composer — still wins it. That is the right default, but it
+/// also means a swipe starting *on* the message list is swallowed by the
+/// scroll view. The left-edge strip is the escape hatch, and it is where the
+/// system trains people to start a back-swipe anyway.
+private struct SwipeRightToDismiss: ViewModifier {
+    let onDismiss: () -> Void
+
+    @State private var offset: CGFloat = 0
+
+    /// Rightward only, and near-horizontal only — a diagonal drag is someone
+    /// scrolling the thread, not leaving it.
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onChanged { value in
+                guard value.translation.width > 0, abs(value.translation.height) < 80 else { return }
+                offset = value.translation.width
+            }
+            .onEnded { value in
+                if value.translation.width > 80 && abs(value.translation.height) < 60 {
+                    onDismiss()
+                } else {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { offset = 0 }
+                }
+            }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            // Tracks the finger, so the thread reads as being dragged aside
+            // rather than snapping shut once a threshold is crossed.
+            .offset(x: offset)
+            .gesture(drag)
+            .overlay(alignment: .leading) {
+                Color.clear
+                    .frame(width: 22)
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(drag)
+                    .ignoresSafeArea()
+            }
+    }
+}
+
+extension View {
+    /// Dismisses on a rightward swipe. For modal presentations only — a pushed
+    /// view already has this from the navigation stack.
+    func swipeRightToDismiss(perform onDismiss: @escaping () -> Void) -> some View {
+        modifier(SwipeRightToDismiss(onDismiss: onDismiss))
     }
 }
 
@@ -321,8 +389,13 @@ struct MessageBubble: View {
                 .foregroundStyle(Theme.textSecondary)
 
             if let clip {
-                ClipView(clip: clip, isActive: true)
-                    .frame(width: 118, height: 168)
+                // Fitted inside a card cut to the clip's own shape: the
+                // reaction preview shows the same frame the recipient saw,
+                // not a portrait crop of it.
+                ClipView(clip: clip, isActive: true, contentMode: .fit)
+                    .frame(width: 118)
+                    .aspectRatio(clip.displayAspectRatio, contentMode: .fit)
+                    .background(Color.black)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)

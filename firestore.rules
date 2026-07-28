@@ -22,7 +22,7 @@ service cloud.firestore {
     function onlySoftProfileFields() {
       return request.resource.data.diff(resource.data).affectedKeys()
         .hasOnly(['name', 'nameLower', 'avatarEmoji', 'avatarURL', 'city', 'bio',
-                  'interests', 'isPrivate', 'updatedAt']);
+                  'interests', 'isPrivate', 'notificationPrefs', 'updatedAt']);
     }
 
     // `nameLower` exists only so search can run a prefix range over names. It
@@ -104,6 +104,25 @@ service cloud.firestore {
 
     match /friendCodes/{code} {
       allow read, write: if false;
+    }
+
+    // Logs, and the engagement hanging off them. Closed in both directions:
+    // reads go through listFriendLogs / listPublicLogs / listSpotLogs, which is
+    // what enforces the recipient scoping on a friends-only log, and every
+    // write is a callable.
+    //
+    // The likes and comments subcollections matter here specifically. A client
+    // that could write `likes/{uid}` directly could like as somebody else or
+    // desynchronise `likeCount` from the documents it counts, and one that
+    // could write `comments/{id}` could post under another account's name —
+    // the author fields are denormalised at write time, so nothing downstream
+    // re-checks who actually wrote it. toggleLikeLog / addComment own both.
+    match /logs/{logId} {
+      allow read, write: if false;
+
+      match /{engagement=**} {
+        allow read, write: if false;
+      }
     }
 
     // Beacons. Closed in both directions, same as `logs`: every write is a

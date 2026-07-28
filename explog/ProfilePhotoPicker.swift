@@ -34,6 +34,17 @@ struct AvatarPhotoButton<Label: View>: View {
     @State private var showPhotosPicker = false
     @State private var showCamera = false
     @State private var photosPickerItem: PhotosPickerItem?
+    /// The picked photo, held until it has been framed. Both sources — library
+    /// and camera — funnel through here, so cropping isn't something one path
+    /// gets and the other doesn't.
+    @State private var pendingCrop: PendingCrop?
+
+    /// `fullScreenCover(item:)` needs an `Identifiable`, and `UIImage` has no
+    /// identity of its own — two picks of the same photo are different events.
+    private struct PendingCrop: Identifiable {
+        let id = UUID()
+        let image: UIImage
+    }
 
     private var cameraAvailable: Bool {
         UIImagePickerController.isSourceTypeAvailable(.camera)
@@ -54,19 +65,35 @@ struct AvatarPhotoButton<Label: View>: View {
                 guard let item else { return }
                 Task {
                     guard let data = try? await item.loadTransferable(type: Data.self),
-                          let image = UIImage(data: data),
-                          let fileName = AvatarPhotoStore.save(image) else { return }
-                    onPicked(fileName)
+                          let image = UIImage(data: data) else { return }
+                    // Framed before it's saved, never straight to disk: the
+                    // display sites all centre-crop, so an unframed photo is a
+                    // guess about where the subject is.
+                    pendingCrop = PendingCrop(image: image)
                     photosPickerItem = nil
                 }
             }
             .fullScreenCover(isPresented: $showCamera) {
                 CameraImagePicker { image in
                     showCamera = false
-                    guard let image, let fileName = AvatarPhotoStore.save(image) else { return }
-                    onPicked(fileName)
+                    guard let image else { return }
+                    // Queued behind the camera cover's own dismissal. Two
+                    // full-screen covers on one view can't transition at the
+                    // same time — setting this synchronously here means the
+                    // crop screen is asked for while the camera is still going
+                    // away, and SwiftUI silently drops it.
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(350))
+                        pendingCrop = PendingCrop(image: image)
+                    }
                 }
                 .ignoresSafeArea()
+            }
+            .fullScreenCover(item: $pendingCrop) { pending in
+                AvatarCropView(image: pending.image) { cropped in
+                    guard let fileName = AvatarPhotoStore.save(cropped) else { return }
+                    onPicked(fileName)
+                }
             }
     }
 }

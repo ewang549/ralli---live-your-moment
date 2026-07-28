@@ -28,6 +28,25 @@ struct HourOverlay: View {
     }
 }
 
+// MARK: - Caption type
+
+extension Font {
+    /// The one type a log's caption is ever drawn in.
+    ///
+    /// `Clip.label` used to be styled independently at six call sites — the
+    /// profile grid, the recap, Pulse, the log player, and twice in Places —
+    /// each picking its own size and weight for the same string, so the same
+    /// caption changed shape as you moved between screens. Defined here, next
+    /// to `HourOverlay`, because it is deliberately the stamp's family one step
+    /// down: same rounded face, lighter weight, smaller size. The two read as
+    /// one block wherever they appear together.
+    static let logCaption = Font.system(size: 17, weight: .semibold, design: .rounded)
+
+    /// `logCaption` a size down, for the compose field on the review screen
+    /// and the send preview — secondary to the hour stamp it sits under.
+    static let logCaptionCompact = Font.system(size: 15, weight: .semibold, design: .rounded)
+}
+
 /// `HourOverlay` over the current hour, kept current while the screen is up.
 ///
 /// Used where there is no captured clip to stamp yet — the live viewfinder —

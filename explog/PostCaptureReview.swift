@@ -6,11 +6,17 @@ import UIKit
 /// carries the log into the audience picker. Mirrors the Snap/Instagram flow —
 /// this is where captions and stickers get added before posting.
 ///
-/// The captured media stays the source of truth; overlays are a creative layer
-/// on top. On Next we hand the chosen share screen the original media plus a
-/// caption seeded from any text you added (full burn-in of stickers/drawing
-/// into an exported video is a larger, separate job — for photos, Save
-/// composites what you see).
+/// Overlays are a creative layer on top of the capture while you're editing,
+/// and become part of it on Next: `OverlayBurnIn` composites text, stickers and
+/// drawings into the media itself — into the pixels for a photo, through an
+/// export for a video — and the share screen is handed that copy. The original
+/// file is never modified.
+///
+/// Burning in rather than carrying the overlays forward as data is what makes
+/// them land where they were dragged. There is no schema on `Clip` for a
+/// position, a colour, a scale or a rotation, and every playback surface draws
+/// `Clip.label` as one fixed caption in the bottom-left — so anything not in
+/// the media itself arrives as a generic caption, which is what it used to do.
 ///
 /// Where Next goes is decided *here*, by the place toggle, rather than by a
 /// segmented control on the screen after it: off sends you straight to the
@@ -31,7 +37,6 @@ struct PostCaptureReview: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Creative overlays.
-    @State private var texts: [TextItem] = []
     @State private var stickers: [StickerItem] = []
     @State private var strokes: [Stroke] = []
     @State private var liveStroke: Stroke?
@@ -40,7 +45,29 @@ struct PostCaptureReview: View {
     // Tool state.
     @State private var tool: Tool = .none
     @State private var brushColor: Color = Theme.coral
-    @State private var editingText: TextItem?
+
+    /// The one caption on the log, typed here and nowhere else.
+    ///
+    /// Deliberately *not* an overlay item: it has no position, scale or
+    /// rotation, and it is never burned into the media. It travels as
+    /// `Clip.label`, which is the field every playback surface already draws —
+    /// so one caption typed here is the caption Pulse, the feeds, the profile
+    /// and the recap all show, rather than pixels baked wherever they landed.
+    @State private var caption: String = ""
+    /// Whether this video's audio is silenced on playback.
+    ///
+    /// Carried on the `Clip` and applied by the player, not stripped from the
+    /// file: the recording keeps its audio track, so this stays reversible and
+    /// costs no export. Video only — a photo has nothing to mute.
+    @State private var isMuted = false
+    /// The capture's displayed width ÷ height, resolved once from the file.
+    ///
+    /// Recorded onto the `Clip` so every surface can size its container to the
+    /// real shape of the shot *before* the asset loads. `AVAsset` only reports
+    /// a natural size asynchronously, long after layout has run, so resolving
+    /// this at playback time would mean laying out against a guess and popping
+    /// to the right shape once the video arrived. 0 means "not resolved".
+    @State private var mediaAspectRatio: Double = 0
 
     // Flow.
     @State private var showSend = false
@@ -48,17 +75,31 @@ struct PostCaptureReview: View {
     @State private var postToPlace = false
     @State private var savedToast = false
     @State private var showStickerTray = false
+    /// The capture with the creative layer burned into it, produced by Next.
+    /// Nil until then, and left nil when there was nothing to burn.
+    @State private var composedMedia: CapturedMedia?
+    /// Next is compositing. Video re-encodes, which is not instant, so the
+    /// button has to say so rather than appearing dead.
+    @State private var composing = false
+
+    /// Keyboard focus for the caption field. Without an explicit binding
+    /// SwiftUI never focuses a `TextField` just because it appeared, and this
+    /// one is meant to be ready to type into the moment the screen arrives.
+    @FocusState private var captionFocused: Bool
 
     private enum Tool { case none, draw }
 
-    /// Fun starter tray for stickers.
-    private let emojiTray = ["✨", "❤️", "🔥", "😎", "🥹", "🎉", "☕️", "🌆", "🎧", "🌿", "💯", "👀", "🫶", "🍜"]
     /// Coral-forward creative palette (white first for legibility over media).
     private let palette: [Color] = [.white, Theme.coral, Color(hex: 0xFF7D90), Theme.mint, Theme.amber, .black]
 
-    private var caption: String {
-        texts.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
+    /// Whether anything was actually drawn on the shot.
+    private var hasOverlays: Bool {
+        !stickers.isEmpty || !strokes.isEmpty
     }
+
+    /// What the send screens are handed: the burned-in copy once Next has
+    /// produced one, otherwise the untouched capture.
+    private var outgoingMedia: CapturedMedia { composedMedia ?? media }
 
     var body: some View {
         GeometryReader { geo in
@@ -76,14 +117,35 @@ struct PostCaptureReview: View {
                     .background(Color.black.ignoresSafeArea())
                     .ignoresSafeArea()
 
+                // Drawing surface + committed overlays.
+                strokeCanvas
+
+                // Tap-out target for the selection. It sits *under* the overlay
+                // layer, so a tap that lands on a sticker is taken by that
+                // item's own select gesture and never reaches here — only taps
+                // that miss everything clear the selection (and with it the
+                // trash button in the top row) and drop the keyboard.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        selectedID = nil
+                        captionFocused = false
+                    }
+
                 // The hour banner, in exactly the type the viewfinder showed it
                 // in — same component, so the stamp can't drift between the two
                 // screens. Live, because the log is stamped when it's sent, not
-                // when it was shot.
-                LiveHourOverlay()
+                // when it was shot. The caption rides directly beneath it, a
+                // size down, so the two read as one stamp block.
+                //
+                // Above the tap-out catcher, or the catcher would swallow every
+                // tap aimed at the field and the caption could never be focused.
+                VStack(spacing: 6) {
+                    LiveHourOverlay()
+                    captionField
+                }
 
-                // Drawing surface + committed overlays.
-                strokeCanvas
                 overlayLayer(in: geo.size)
 
                 // Finger-draw capture sits above overlays only while drawing.
@@ -95,29 +157,74 @@ struct PostCaptureReview: View {
                 controls
                 if tool == .draw { brushBar }
                 if showStickerTray { stickerTray }
-                if let item = editingText { textEditor(for: item) }
                 if savedToast { savedBanner }
             }
         }
         .preferredColorScheme(.dark)
+        // The send screens get the composited capture, not the raw one — and
+        // the caption typed on this screen, which is the only place it can be
+        // typed. It travels as data rather than burned pixels, so the send
+        // screen can show it back and the feeds can draw it themselves.
+        //
+        // Presented as a sheet, which is what makes Back work: this view stays
+        // alive underneath with its caption, stickers and strokes intact, so
+        // dismissing the sheet returns to a screen that is still mid-edit
+        // rather than a fresh one.
         .sheet(isPresented: $showSend) {
             if postToPlace {
-                PublicPlacePostView(media: media, initialName: caption,
+                PublicPlacePostView(media: outgoingMedia, initialName: caption,
+                                    aspectRatio: mediaAspectRatio, isMuted: isMuted,
                                     logSync: logSync, onSent: onSent)
             } else {
-                SendToFriendsView(media: media, initialLabel: caption,
+                SendToFriendsView(media: outgoingMedia, initialLabel: caption,
+                                  aspectRatio: mediaAspectRatio, isMuted: isMuted,
                                   logSync: logSync, onSent: onSent)
             }
         }
         .onAppear { seedOverlayDefaults() }
     }
 
+    /// The caption, fixed under the hour stamp.
+    ///
+    /// One size down from `HourOverlay`'s 34pt and in the same rounded family,
+    /// so it reads as the stamp's second line rather than a separate widget —
+    /// and it matches the type every playback surface draws `Clip.label` in.
+    private var captionField: some View {
+        TextField("", text: $caption, prompt: captionPrompt, axis: .vertical)
+            .focused($captionFocused)
+            .font(.logCaptionCompact)
+            .foregroundStyle(.white)
+            .tint(Theme.coral)
+            .multilineTextAlignment(.center)
+            .lineLimit(1...3)
+            .shadow(color: .black.opacity(0.55), radius: 6, y: 1)
+            .padding(.horizontal, 28)
+            // Focused on arrival: the caption is the one thing this screen is
+            // asking for, so the keyboard is up and waiting rather than costing
+            // a tap to find. Any tap on the media dismisses it.
+            .task {
+                // The request has to land after the field is installed; asking
+                // in the same tick the view appears is silently dropped.
+                try? await Task.sleep(for: .milliseconds(60))
+                captionFocused = true
+            }
+    }
+
+    private var captionPrompt: Text {
+        Text("Add a caption")
+            .foregroundColor(.white.opacity(0.55))
+    }
+
     // MARK: - Media
 
     private var previewClip: Clip {
-        Clip(author: nil, chat: nil, capturedAt: .now, kind: media.kind,
-             assetFileName: media.assetFileName,
-             label: "", emoji: "✨", hueA: 0.03, hueB: 0.12)
+        let clip = Clip(author: nil, chat: nil, capturedAt: .now, kind: media.kind,
+                        assetFileName: media.assetFileName,
+                        label: "", emoji: "✨", hueA: 0.03, hueB: 0.12)
+        // So toggling mute is audible (or rather, inaudible) right here rather
+        // than only reaching the recipient.
+        clip.isMuted = isMuted
+        return clip
     }
 
     private func seedOverlayDefaults() {
@@ -129,8 +236,7 @@ struct PostCaptureReview: View {
         // capture shows the creative surface populated.
         guard ProcessInfo.processInfo.environment["EXPLOG_REVIEW_DEMO"] == "1" else { return }
         let mid = UIScreen.main.bounds.width / 2
-        texts.append(TextItem(text: "good night ✦", color: .white,
-                              position: CGPoint(x: mid, y: 260), scale: 1.3, rotation: .degrees(-4)))
+        caption = "good night ✦"
         stickers.append(StickerItem(emoji: "🌆",
                                     position: CGPoint(x: mid + 90, y: 430), scale: 1.1, rotation: .degrees(10)))
         stickers.append(StickerItem(emoji: "✨",
@@ -170,18 +276,6 @@ struct PostCaptureReview: View {
                 Text(item.emoji).font(.system(size: 72))
             }
         }
-        ForEach($texts) { $item in
-            MovableOverlay(position: $item.position, scale: $item.scale, rotation: $item.rotation,
-                           isSelected: selectedID == item.id,
-                           onSelect: { selectedID = item.id },
-                           onDoubleTap: { editingText = item }) {
-                Text(item.text.isEmpty ? "Tap to edit" : item.text)
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(item.color)
-                    .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
-                    .padding(.horizontal, 6)
-            }
-        }
     }
 
     /// Transparent full-screen catcher that records finger strokes in draw mode.
@@ -202,6 +296,16 @@ struct PostCaptureReview: View {
                         liveStroke = nil
                     }
             )
+            // Tap-out, so the rail button isn't the only way back. Simultaneous
+            // rather than `.onTapGesture` so it composes with the drag above:
+            // a real stroke starts as a drag and never resolves as a tap, while
+            // a tap-without-movement leaves at most a one-point stroke, which
+            // the `points.count > 1` guard already throws away.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { tool = .none }
+                }
+            )
     }
 
     private var brushWidth: CGFloat { 8 }
@@ -218,6 +322,18 @@ struct PostCaptureReview: View {
                 if selectedID != nil {
                     ReviewIconButton(system: "trash") { deleteSelected() }
                         .accessibilityLabel("Delete selection")
+                }
+                // Video only — the inverse of the Save-to-Photos gate below.
+                // A photo has no audio track, so a mute control on one would be
+                // a button that does nothing.
+                if media.kind == .video {
+                    ReviewIconButton(system: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                                     isActive: isMuted) {
+                        isMuted.toggle()
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    }
+                    .accessibilityLabel("Mute audio")
+                    .accessibilityValue(isMuted ? "Muted" : "Sound on")
                 }
                 if media.kind != .video {
                     ReviewIconButton(system: "arrow.down.to.line") { saveComposite() }
@@ -244,10 +360,14 @@ struct PostCaptureReview: View {
         }
     }
 
-    /// The vertical creative rail: Text, Sticker, Draw.
+    /// The vertical creative rail: Sticker, Draw.
+    ///
+    /// Text used to head this rail as a draggable, pinchable overlay item. The
+    /// caption field on this screen replaced it: one caption, in one place, at a
+    /// fixed spot under the hour stamp — so what you type is what every surface
+    /// draws, rather than something burned wherever it happened to be dropped.
     private var creativeRail: some View {
         VStack(spacing: 12) {
-            ReviewRailButton(system: "textformat", label: "Text", isActive: false) { addText() }
             ReviewRailButton(system: "face.smiling", label: "Sticker", isActive: false) { addSticker() }
             ReviewRailButton(system: "scribble.variable", label: "Draw", isActive: tool == .draw) {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
@@ -294,13 +414,21 @@ struct PostCaptureReview: View {
     private var nextButton: some View {
         Button {
             selectedID = nil
-            showSend = true
+            Task { await advance() }
         } label: {
             HStack(spacing: 6) {
-                Text("Next")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 14, weight: .bold))
+                if composing {
+                    ProgressView()
+                        .tint(Theme.onCoral)
+                        .scaleEffect(0.8)
+                    Text("Adding your text…")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                } else {
+                    Text("Next")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 14, weight: .bold))
+                }
             }
             .foregroundStyle(Theme.onCoral)
             .padding(.horizontal, 22)
@@ -309,7 +437,80 @@ struct PostCaptureReview: View {
             .shadow(color: Theme.coralGlow.opacity(0.5), radius: 14, y: 4)
         }
         .buttonStyle(.plain)
+        .disabled(composing)
+        .animation(.easeOut(duration: 0.18), value: composing)
         .accessibilityLabel(postToPlace ? "Next: name this place post" : "Next: choose who to send to")
+    }
+
+    /// Burns the creative layer into the capture, then opens the send screen.
+    ///
+    /// Done here rather than at capture time because this is the first moment
+    /// the overlays are final, and rather than at playback because burning in
+    /// once beats compositing on every view — and because it means every
+    /// surface that plays a clip stays a plain video player.
+    ///
+    /// A capture with nothing drawn on it skips all of this and goes straight
+    /// through, so the common case pays nothing.
+    private func advance() async {
+        guard hasOverlays else {
+            // Clearing rather than leaving it: Back from the send screen can
+            // return here and delete every sticker and stroke, and a stale
+            // burned-in copy would then be sent with overlays the user removed.
+            composedMedia = nil
+            await resolveAspectRatio(of: media)
+            showSend = true
+            return
+        }
+        composing = true
+        defer { composing = false }
+
+        if let render = renderOverlayLayer() {
+            composedMedia = await OverlayBurnIn.burn(render, into: media)
+        }
+        // Measured on what actually gets sent. The burn-in re-encodes through a
+        // video composition, so the exported copy is the one whose shape the
+        // feeds will be sizing containers to.
+        await resolveAspectRatio(of: outgoingMedia)
+        showSend = true
+    }
+
+    /// Reads the capture's displayed dimensions once, for `Clip.videoAspectRatio`.
+    ///
+    /// `OverlayBurnIn.naturalSize` already resolves this correctly for both
+    /// kinds — orientation-applied for a photo, preferred-transform-applied for
+    /// a video — and it is the same measurement the burn-in crops against, so
+    /// sharing it keeps the stored ratio and the baked overlay in agreement.
+    private func resolveAspectRatio(of media: CapturedMedia) async {
+        guard let size = await OverlayBurnIn.naturalSize(of: media),
+              size.width > 0, size.height > 0 else { return }
+        mediaAspectRatio = Double(size.width / size.height)
+    }
+
+    /// Flattens the overlays — and only the overlays — onto a transparent
+    /// screen-sized canvas.
+    ///
+    /// Transparent rather than including the media, because the media is
+    /// already the thing being drawn onto and re-encoding it through
+    /// `ImageRenderer` would throw away its resolution. `saveComposite()` does
+    /// include it, correctly: that path is producing a screenshot for Photos,
+    /// not a replacement for the capture.
+    @MainActor
+    private func renderOverlayLayer() -> OverlayBurnIn.OverlayRender? {
+        let screen = UIScreen.main.bounds.size
+        let renderer = ImageRenderer(content:
+            ZStack {
+                Color.clear
+                staticStrokeCanvas
+                staticOverlays
+            }
+            .frame(width: screen.width, height: screen.height)
+        )
+        renderer.scale = UIScreen.main.scale
+        // Without this the renderer fills the untouched areas with white and
+        // the burn-in covers the whole shot.
+        renderer.isOpaque = false
+        guard let image = renderer.uiImage else { return nil }
+        return OverlayBurnIn.OverlayRender(image: image, screenSize: screen)
     }
 
     // MARK: - Brush bar (draw mode)
@@ -364,25 +565,7 @@ struct PostCaptureReview: View {
     private var stickerTray: some View {
         VStack {
             Spacer()
-            VStack(spacing: 12) {
-                Capsule().fill(Theme.textTertiary).frame(width: 36, height: 5).padding(.top, 8)
-                Text("Stickers")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.9))
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 7), spacing: 14) {
-                    ForEach(emojiTray, id: \.self) { emoji in
-                        Button { dropSticker(emoji) } label: {
-                            Text(emoji).font(.system(size: 32))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 24)
-            }
-            .frame(maxWidth: .infinity)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            EmojiPickerTray { dropSticker($0) }
         }
         .ignoresSafeArea()
         .background(
@@ -390,50 +573,6 @@ struct PostCaptureReview: View {
                 .onTapGesture { withAnimation { showStickerTray = false } }
         )
         .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-
-    // MARK: - Text editor
-
-    private func textEditor(for item: TextItem) -> some View {
-        ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea()
-                .onTapGesture { commitText() }
-            VStack(spacing: 24) {
-                TextField("", text: bindingForText(item.id)?.text ?? .constant(""), axis: .vertical)
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(currentTextColor(item.id))
-                    .tint(Theme.coral)
-                    .padding(.horizontal, 24)
-
-                // Colour picker for the text.
-                HStack(spacing: 14) {
-                    ForEach(palette.indices, id: \.self) { i in
-                        let color = palette[i]
-                        Button {
-                            bindingForText(item.id)?.wrappedValue.color = color
-                        } label: {
-                            Circle().fill(color).frame(width: 30, height: 30)
-                                .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1))
-                                .overlay {
-                                    if colorsEqual(color, currentTextColor(item.id)) {
-                                        Circle().strokeBorder(Theme.coral, lineWidth: 2.5).padding(-4)
-                                    }
-                                }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                Button("Done") { commitText() }
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.onCoral)
-                    .padding(.horizontal, 28).frame(height: 46)
-                    .background(Capsule().fill(Theme.coral))
-                    .buttonStyle(.plain)
-            }
-        }
-        .transition(.opacity)
     }
 
     private var savedBanner: some View {
@@ -454,16 +593,6 @@ struct PostCaptureReview: View {
 
     // MARK: - Actions
 
-    private func addText() {
-        tool = .none
-        let item = TextItem(text: "", color: .white,
-                            position: CGPoint(x: UIScreen.main.bounds.midX, y: UIScreen.main.bounds.midY),
-                            scale: 1, rotation: .zero)
-        texts.append(item)
-        selectedID = item.id
-        editingText = item
-    }
-
     private func addSticker() {
         tool = .none
         selectedID = nil
@@ -480,15 +609,7 @@ struct PostCaptureReview: View {
     }
 
     private func deleteSelected() {
-        texts.removeAll { $0.id == selectedID }
         stickers.removeAll { $0.id == selectedID }
-        selectedID = nil
-    }
-
-    private func commitText() {
-        // Drop empty text overlays on close.
-        texts.removeAll { $0.text.trimmingCharacters(in: .whitespaces).isEmpty }
-        withAnimation(.easeInOut(duration: 0.2)) { editingText = nil }
         selectedID = nil
     }
 
@@ -527,27 +648,10 @@ struct PostCaptureReview: View {
                     .scaleEffect(item.scale).rotationEffect(item.rotation)
                     .position(item.position)
             }
-            ForEach(texts) { item in
-                Text(item.text)
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(item.color)
-                    .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
-                    .scaleEffect(item.scale).rotationEffect(item.rotation)
-                    .position(item.position)
-            }
         }
     }
 
     // MARK: - Bindings & helpers
-
-    private func bindingForText(_ id: UUID) -> Binding<TextItem>? {
-        guard let idx = texts.firstIndex(where: { $0.id == id }) else { return nil }
-        return $texts[idx]
-    }
-
-    private func currentTextColor(_ id: UUID) -> Color {
-        texts.first { $0.id == id }?.color ?? .white
-    }
 
     private func colorsEqual(_ a: Color, _ b: Color) -> Bool {
         UIColor(a).cgColor == UIColor(b).cgColor
@@ -561,15 +665,6 @@ private extension PostCaptureReview {
 }
 
 // MARK: - Overlay models
-
-private struct TextItem: Identifiable {
-    let id = UUID()
-    var text: String
-    var color: Color
-    var position: CGPoint
-    var scale: CGFloat
-    var rotation: Angle
-}
 
 private struct StickerItem: Identifiable {
     let id = UUID()
@@ -638,17 +733,22 @@ private struct MovableOverlay<Content: View>: View {
 
 // MARK: - Buttons
 
-/// A soft glass circle used across the review chrome.
+/// A soft glass circle used across the review chrome. Fills coral when it
+/// represents an armed state, matching the creative rail's on/off language.
 private struct ReviewIconButton: View {
     let system: String
+    var isActive: Bool = false
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(isActive ? Theme.onCoral : .white)
                 .frame(width: 46, height: 46)
-                .background(Circle().fill(.ultraThinMaterial))
+                .background {
+                    Circle().fill(.ultraThinMaterial)
+                    if isActive { Circle().fill(Theme.coral) }
+                }
                 .overlay(Circle().strokeBorder(.white.opacity(0.14), lineWidth: 0.75))
         }
         .buttonStyle(.plain)

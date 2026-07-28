@@ -4,8 +4,9 @@ import UIKit
 /// Watches the physical device orientation so the app can react to the user
 /// simply *turning the phone sideways* — the gesture that opens the camera.
 /// The camera screen then forces the *interface* into landscape itself (see
-/// `InterfaceOrientationLock`), so this observer only needs the coarse
-/// landscape-vs-portrait signal, not the specific edge.
+/// `InterfaceOrientationLock`), which pins one specific edge — so this reports
+/// both the coarse landscape-vs-portrait signal that opens and closes the
+/// camera, and which edge, which is what re-pins the lock on a 180° flip.
 ///
 /// `UIDevice.orientation` also reports `.faceUp` / `.faceDown` / `.unknown`;
 /// those are ignored so a phone resting on a table never flips the UI. Note it
@@ -16,12 +17,19 @@ import UIKit
 final class OrientationObserver {
     private(set) var isLandscape = false
 
+    /// Which landscape edge the phone is on, `nil` in portrait. Separate from
+    /// `isLandscape` because turning the phone end-for-end between the two
+    /// landscape edges leaves that flag — and the screen's size — unchanged,
+    /// so it's the only signal that the pinned interface orientation has gone
+    /// stale and needs re-pointing.
+    private(set) var landscapeEdge: UIDeviceOrientation?
+
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
 
     func start() {
         guard monitorTask == nil else { return }
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        isLandscape = UIDevice.current.orientation.isLandscape
+        update(for: UIDevice.current.orientation)
 
         monitorTask = Task { [weak self] in
             let stream = NotificationCenter.default.notifications(named: UIDevice.orientationDidChangeNotification)
@@ -30,9 +38,14 @@ final class OrientationObserver {
                 let orientation = UIDevice.current.orientation
                 // Only act on real interface orientations, never face-up/down.
                 guard orientation.isValidInterfaceOrientation else { continue }
-                self.isLandscape = orientation.isLandscape
+                self.update(for: orientation)
             }
         }
+    }
+
+    private func update(for orientation: UIDeviceOrientation) {
+        isLandscape = orientation.isLandscape
+        landscapeEdge = orientation.isLandscape ? orientation : nil
     }
 
     func stop() {

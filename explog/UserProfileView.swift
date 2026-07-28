@@ -1,48 +1,78 @@
 import SwiftUI
 import SwiftData
 import FirebaseAuth
-import StreamChat
-import StreamChatSwiftUI
 
-// MARK: - Tab 1: User profile & privacy settings
+// MARK: - Tab 1: Your profile — identity, stats, and everything you've filmed
+//
+// Editing lives in `EditProfileView`, account administration in `SettingsView`.
 
+/// The Profile tab's landing screen.
+///
+/// This used to be one scrolling form that mixed three unrelated jobs: how you
+/// present yourself, how your account is administered, and nothing at all about
+/// what you'd actually posted. It's now a place you *land*: who you are, what
+/// your logging adds up to, and everything you've filmed. Editing moved to
+/// `EditProfileView` and account controls to `SettingsView`, each one tap away.
 struct UserProfileView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var friends: [Friend]
-
-    private let interestOptions = ["surf", "climb", "hike", "food", "music", "photo", "code", "games"]
+    @Query(sort: \SpotClip.capturedAt, order: .reverse) private var allSpotClips: [SpotClip]
 
     private var me: Friend? { friends.first { $0.isMe } }
 
     @State private var isRecovering = false
     @State private var recoveryError: String?
-    @State private var showBlockedAccounts = false
-    @State private var confirmingDelete = false
-    @State private var deleting = false
-    @State private var deleteError: String?
-    /// Debounces pushing edited profile fields to Firestore — the fields are
-    /// bound straight to SwiftData, so they change on every keystroke.
-    @State private var profileSyncTask: Task<Void, Never>?
+    @State private var showEditProfile = false
+    @State private var showSettings = false
+    /// The log whose Insights sheet is open.
+    @State private var insightsClip: Clip?
+    /// The log awaiting delete confirmation. Deleting media is not undoable,
+    /// so it never happens straight off the menu.
+    @State private var pendingDelete: Clip?
+    /// The highlight currently open in the full-screen player.
+    @State private var playingClip: Clip?
 
     var body: some View {
         ZStack {
             GlassBackground()
             content
         }
+        .sheet(isPresented: $showEditProfile) {
+            if let me { EditProfileView(me: me) }
+        }
+        .sheet(isPresented: $showSettings) {
+            if let me { SettingsView(me: me) }
+        }
+        .sheet(item: $insightsClip) { clip in
+            LogInsightsView(clip: clip)
+        }
+        // Your own Highlights play in place rather than redirecting to the
+        // Places feed the way another account's grid does — this grid is
+        // already yours, so there is nothing to go and browse.
+        .fullScreenCover(item: $playingClip) { clip in
+            HighlightPlayerView(clip: clip, author: me)
+        }
+        .confirmationDialog("Delete this log?",
+                            isPresented: Binding(get: { pendingDelete != nil },
+                                                 set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                if let pendingDelete { delete(pendingDelete) }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("This removes the video and its copy on the server. It can't be undone.")
+        }
 #if DEBUG
-        // CLI verification hook: SIMCTL_CHILD_EXPLOG_AUTO_LOGOUT=1 taps Log out
-        // after the profile settles, so the "logout doesn't crash" invariant is
-        // checkable from the command line.
-        //
-        // Pair it with EXPLOG_AUTO_AUTH only to exercise the sign-out → wipe →
-        // sign-in cycle: WelcomeView's own hook logs straight back in, so the
-        // app lands back on Profile rather than Welcome. To *see* the signed-out
-        // state, run this hook with no EXPLOG_AUTO_AUTH and rely on the session
-        // Firebase already persisted.
+        // The account controls moved to Settings, so the CLI hooks that drive
+        // them have to open Settings first. The hooks themselves live there.
         .task {
-            guard ProcessInfo.processInfo.environment["EXPLOG_AUTO_LOGOUT"] == "1" else { return }
-            try? await Task.sleep(for: .seconds(3))
-            logOut()
+            let environment = ProcessInfo.processInfo.environment
+            guard environment["EXPLOG_AUTO_ACCOUNT"] != nil
+                    || environment["EXPLOG_AUTO_LOGOUT"] == "1" else { return }
+            try? await Task.sleep(for: .seconds(1))
+            showSettings = true
         }
 #endif
     }
@@ -50,7 +80,7 @@ struct UserProfileView: View {
     @ViewBuilder
     private var content: some View {
         if let me {
-            profileForm(for: me)
+            profileBody(for: me)
         } else {
             // No local "me" row. Normally AuthGateView caches it from Firestore
             // on launch; if that hasn't happened (offline, or the cache was
@@ -59,6 +89,348 @@ struct UserProfileView: View {
             missingProfileState
         }
     }
+
+    // MARK: - Landing
+
+    private func profileBody(for me: Friend) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                titleBar
+                identityHeader(for: me)
+                actionButtons
+                statsSection(for: me)
+                highlightsSection(for: me)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 110)
+        }
+    }
+
+    private var titleBar: some View {
+        HStack {
+            Text("Profile")
+                .font(.system(size: 28, weight: .heavy, design: .rounded))
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+            RalliWordmark(size: 22)
+        }
+        .padding(.top, 12)
+    }
+
+    private func identityHeader(for me: Friend) -> some View {
+        VStack(spacing: 8) {
+            GlassOrbAvatar(friend: me, size: 104, isActive: true)
+            Text(me.name.isEmpty ? "You" : me.name)
+                .font(.title2.weight(.bold))
+                .foregroundStyle(Theme.textPrimary)
+            if !me.displayUserId.isEmpty {
+                Text(me.displayUserId)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            if !me.city.isEmpty {
+                Label("\(me.city)\(me.age > 0 ? " · \(me.age)" : "")",
+                      systemImage: "mappin.and.ellipse")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            if !me.bio.isEmpty {
+                Text(me.bio)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+            if me.isPrivate {
+                Label("Private profile", systemImage: "lock.fill")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background { Capsule().fill(Theme.sunken) }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 10) {
+            Button { showEditProfile = true } label: {
+                Label("Edit profile", systemImage: "pencil")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.onAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background { Capsule().fill(Theme.accentGradient) }
+            }
+            .buttonStyle(PressScaleStyle())
+
+            Button { showSettings = true } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 46, height: 46)
+                    .background {
+                        Circle().fill(Theme.accentWash)
+                            .overlay { Circle().strokeBorder(Theme.accent.opacity(0.3), lineWidth: 1) }
+                    }
+            }
+            .buttonStyle(PressScaleStyle())
+            .accessibilityLabel("Settings")
+        }
+    }
+
+    // MARK: - Stats
+    //
+    // Every tile here is a real count off the local model. Two things the brief
+    // asked for aren't in this list, both for the same reason:
+    //
+    //   • "Distance travelled" needs a location history per log, and there
+    //     isn't one — a `Clip` records no coordinate, and `Spot` only carries
+    //     one for places that came from location search. So it's scoped down to
+    //     the number of distinct places you've posted from, which is a real
+    //     figure derived from real rows rather than an invented mileage.
+    //   • "Total hours logged" would be a sum of clip durations, which nothing
+    //     stores. "Logs sent" is the count of hourly logs, which is the same
+    //     idea measured in something the app actually has.
+
+    private func statsSection(for me: Friend) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("BY THE NUMBERS")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Theme.textSecondary)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+                      spacing: 10) {
+                statTile("figure.wave", "\(me.joinedBeacons.count)", "experiences")
+                statTile("mappin.and.ellipse", "\(distinctPlaces(for: me))", "places")
+                statTile("paperplane.fill", "\(me.clips.count)", "logs sent")
+                statTile("flame.fill", "\(bestStreak(for: me))", "best streak")
+                statTile("person.2.fill", "\(friendCount)", "friends")
+                statTile("video.fill", "\(highlights(for: me).count)", "on your grid")
+            }
+        }
+    }
+
+    private func statTile(_ icon: String, _ value: String, _ label: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+            Text(value)
+                .font(.system(size: 20, weight: .heavy, design: .rounded).monospacedDigit())
+                .foregroundStyle(Theme.textPrimary)
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background { GlassCard(cornerRadius: 14) { Color.clear } }
+    }
+
+    private var friendCount: Int {
+        friends.filter { !$0.isMe }.count
+    }
+
+    /// Longest run going in any of your 1-on-1 threads.
+    ///
+    /// Deliberately the max rather than `Friend.streakCount`, which returns
+    /// whichever DM happens to come first in the relationship — fine as a row
+    /// detail next to a specific person, meaningless as a headline number
+    /// about you.
+    private func bestStreak(for me: Friend) -> Int {
+        me.chats.filter { !$0.isGroup }.map(\.streak).max() ?? 0
+    }
+
+    /// Distinct places you've posted from.
+    ///
+    /// Matched on account id where there is one, falling back to display name
+    /// for seed and legacy rows — the same rule `PublicProfileSheet` uses,
+    /// because `SpotClip` carries a plain author name rather than a `Friend`.
+    private func distinctPlaces(for me: Friend) -> Int {
+        let mine = allSpotClips.filter { clip in
+            if !clip.authorUID.isEmpty {
+                return !me.remoteUID.isEmpty && clip.authorUID == me.remoteUID
+            }
+            return !me.name.isEmpty
+                && clip.authorName.caseInsensitiveCompare(me.name) == .orderedSame
+        }
+        return Set(mine.compactMap { $0.spot?.id }).count
+    }
+
+    // MARK: - Highlights
+
+    /// What you've posted publicly to a place, newest first.
+    ///
+    /// `intendedSpotID` is the test rather than `kind`: it's set only by
+    /// `PublicPlacePostView.post()` and stays empty for every friends-only
+    /// send. Filtering on media kind instead put every hourly log you ever
+    /// filmed on your public grid — a private send to one friend is not a
+    /// highlight, and this screen is the public face of the account.
+    private func highlights(for me: Friend) -> [Clip] {
+        me.clips
+            .filter { !$0.intendedSpotID.isEmpty }
+            .sorted { $0.capturedAt > $1.capturedAt }
+    }
+
+    @ViewBuilder
+    private func highlightsSection(for me: Friend) -> some View {
+        let clips = highlights(for: me)
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text("HIGHLIGHTS")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Theme.textSecondary)
+
+            if clips.isEmpty {
+                VStack(spacing: 6) {
+                    Text("🎬").font(.system(size: 40))
+                    Text("Nothing posted publicly yet")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("Posts to a place will show up here.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 30)
+                .background { GlassCard(cornerRadius: 16) { Color.clear } }
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
+                                    GridItem(.flexible(), spacing: 10)],
+                          spacing: 10) {
+                    ForEach(clips) { clip in
+                        highlightCell(clip)
+                    }
+                }
+            }
+        }
+    }
+
+    /// One posted log, with its own overflow menu pinned bottom-right.
+    private func highlightCell(_ clip: Clip) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            // The tile takes the clip's own shape and fits inside it, so the
+            // whole frame survives — including a sticker or a doodle placed
+            // near an edge, which a fixed-ratio fill used to cut off.
+            Color.black
+            ClipMediaView(kind: clip.kind,
+                          localURL: clip.assetURL,
+                          remoteURL: clip.remoteURL,
+                          emoji: clip.emoji,
+                          label: clip.label,
+                          hueA: clip.hueA,
+                          hueB: clip.hueB,
+                          // Still frames, not a grid of running players.
+                          isActive: false,
+                          contentMode: .fit)
+                .aspectRatio(clip.displayAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipped()
+                // The tap target is the media rather than the whole tile, so
+                // it can't compete with the overflow menu sitting on top of
+                // it — Insights and Delete keep their own taps.
+                .contentShape(Rectangle())
+                .onTapGesture { playingClip = clip }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(clip.label.isEmpty ? "Play log" : "Play \(clip.label)")
+
+            // A failed send is the one thing worth surfacing on the tile
+            // itself — it's the difference between "posted" and "still sitting
+            // on this phone", and nothing else on this screen would say so.
+            if clip.sendState == .failed {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(Circle().fill(Theme.accent))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(8)
+            }
+
+            overflowMenu(for: clip)
+                .padding(8)
+        }
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+
+    private func overflowMenu(for clip: Clip) -> some View {
+        Menu {
+            Button { insightsClip = clip } label: {
+                Label("Insights", systemImage: "chart.bar")
+            }
+            Button(role: .destructive) { pendingDelete = clip } label: {
+                Label("Delete video", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                // Blur rather than a flat black disc: this sits directly on
+                // video, where a solid fill reads as a sticker pasted over the
+                // frame. The material picks up what's behind it, so the control
+                // belongs to the tile instead of covering it.
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay { Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1) }
+                .environment(\.colorScheme, .dark)
+        }
+        .accessibilityLabel("More options")
+    }
+
+    /// Server copy first, then the file, then the row.
+    ///
+    /// The server call is best-effort and deliberately not awaited before the
+    /// local delete: the user asked for this log to be gone, and leaving it on
+    /// their own grid because the network was down would be the wrong answer.
+    /// An unpublished log has nothing on the server to remove.
+    private func delete(_ clip: Clip) {
+        if clip.isPublished {
+            let remoteID = clip.remoteID
+            Task { try? await FirestoreService.deleteLog(id: remoteID) }
+            // The Places feed reads a *different* model: publishing to a place
+            // writes a `SpotClip` mirror alongside this `Clip`, and dropping
+            // only the `Clip` left that mirror rendering in Places, Niche and
+            // Bookmarks forever. `LogSync.materialisePublic` prunes these too,
+            // which covers a delete made on another device — this is just the
+            // immediate half, so the row goes on the same tap.
+            deleteSpotMirror(remoteID: remoteID)
+        }
+        if let assetURL = clip.assetURL {
+            try? FileManager.default.removeItem(at: assetURL)
+        }
+        // The chat's `clips` array holds it too; dropping the row without this
+        // leaves the thread pointing at a deleted model.
+        clip.chat?.clips.removeAll { $0.id == clip.id }
+        modelContext.delete(clip)
+        try? modelContext.save()
+    }
+
+    /// Drops the Places-feed row that shares this log's server id.
+    ///
+    /// Keyed on `remoteID` because that is the only thing the two models have
+    /// in common — they're separate `@Model` types with their own local ids,
+    /// and the mirror is stamped with the log's server id as soon as the
+    /// publish returns (see `PublicPlacePostView.post`). An empty id can't
+    /// identify anything, so it's refused rather than matching every
+    /// never-published row at once.
+    private func deleteSpotMirror(remoteID: String) {
+        guard !remoteID.isEmpty else { return }
+        let mirrors = (try? modelContext.fetch(
+            FetchDescriptor<SpotClip>(predicate: #Predicate { $0.remoteID == remoteID })
+        )) ?? []
+        mirrors.forEach { modelContext.delete($0) }
+    }
+
+    // MARK: - Recovery
 
     private var missingProfileState: some View {
         VStack(spacing: 14) {
@@ -88,7 +460,16 @@ struct UserProfileView: View {
             .disabled(isRecovering)
 
 #if DEBUG
-            demoDataButton
+            // Dev-only: demo content is gated off real accounts, so this is how
+            // you get the fake roster back while signed in.
+            Button {
+                SeedData.seed(context: modelContext)
+            } label: {
+                Label("Load demo data", systemImage: "wand.and.stars")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.top, 6)
 #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -110,387 +491,6 @@ struct UserProfileView: View {
             }
             isRecovering = false
         }
-    }
-
-#if DEBUG
-    /// Dev-only: demo content is gated off real accounts, so this is how you
-    /// get the fake roster back while signed in.
-    private var demoDataButton: some View {
-        Button {
-            SeedData.seed(context: modelContext)
-        } label: {
-            Label("Load demo data", systemImage: "wand.and.stars")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Theme.textSecondary)
-        }
-        .padding(.top, 6)
-    }
-#endif
-
-    private func profileForm(for me: Friend) -> some View {
-        @Bindable var profile = me
-        return ScrollViewReader { scrollProxy in
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text("Profile")
-                        .font(.system(size: 28, weight: .heavy, design: .rounded))
-                        .foregroundStyle(Theme.textPrimary)
-                    Spacer()
-                    RalliWordmark(size: 22)
-                }
-                .padding(.top, 12)
-
-                // Profile picture — one large, centred photo. Ralli uses real
-                // photos only now, so there's no emoji picker beside it; the
-                // emoji orb survives purely as the fallback fill inside
-                // `GlassOrbAvatar` when no photo has been chosen yet.
-                AvatarPhotoButton(onPicked: { fileName in
-                    profile.avatarPhotoFileName = fileName
-                    try? modelContext.save()
-                    uploadAvatar(fileName: fileName)
-                }) {
-                    ZStack(alignment: .bottomTrailing) {
-                        GlassOrbAvatar(friend: me, size: 112, isActive: true)
-                        AvatarPhotoBadge().offset(x: 2, y: 2)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 4)
-                .accessibilityLabel("Change profile photo")
-
-                // NEW: Public/Private privacy toggle — gates all community features.
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle(isOn: Binding(get: { !me.isPrivate },
-                                         set: { profile.isPrivate = !$0 })) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(me.isPrivate ? "Private profile" : "Public profile")
-                                .font(.headline)
-                                .foregroundStyle(Theme.textPrimary)
-                            Text(me.isPrivate
-                                 ? "Hidden from community feeds. Public activities are locked."
-                                 : "Visible in community feeds. You can host and join public activities.")
-                                .font(.caption)
-                                .foregroundStyle(Theme.textSecondary)
-                        }
-                    }
-                    .tint(Theme.accent)
-                }
-                .padding(14)
-                .background {
-                    GlassCard(cornerRadius: 16) { Color.clear }
-                        // Public profiles carry an coral edge — the setting is
-                        // legible without reading the label.
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(me.isPrivate ? Color.clear : Theme.accent.opacity(0.5),
-                                              lineWidth: 1)
-                        }
-                }
-
-                // Primary metadata fields.
-                VStack(spacing: 10) {
-                    field("Full name", text: $profile.name)
-                    field("Email", text: $profile.email, keyboard: .emailAddress)
-                    field("Phone", text: $profile.phone, keyboard: .phonePad)
-                    field("City", text: $profile.city)
-                    HStack {
-                        Text("Age")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.textSecondary)
-                        Spacer()
-                        Stepper("\(me.age)", value: $profile.age, in: 13...120)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                            .fixedSize()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background { GlassCard(cornerRadius: 12) { Color.clear } }
-                }
-
-                // Bio.
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("BIO")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(Theme.textSecondary)
-                    TextField("Say something about yourself…", text: $profile.bio, axis: .vertical)
-                        .lineLimit(2...4)
-                        .padding(12)
-                        .background { GlassCard(cornerRadius: 12) { Color.clear } }
-                        .foregroundStyle(Theme.textPrimary)
-                }
-
-                // Interest tags (multi-select chips).
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("INTERESTS")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(Theme.textSecondary)
-                    FlowChips(options: interestOptions, selection: $profile.interests)
-                }
-
-                // Account: signed-in Firebase identity, safety, log out, delete.
-                if let firebaseUser = Auth.auth().currentUser {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("ACCOUNT")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(Theme.textSecondary)
-                        HStack {
-                            Text(firebaseUser.email ?? firebaseUser.uid)
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.textPrimary)
-                            Spacer()
-                            Button(role: .destructive) {
-                                logOut()
-                            } label: {
-                                Text("Log out")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                        }
-                        .padding(14)
-                        .background { GlassCard(cornerRadius: 12) { Color.clear } }
-
-                        // Unblocking is only reachable here — a blocked account
-                        // is by design absent from search, feeds and chat.
-                        Button {
-                            showBlockedAccounts = true
-                        } label: {
-                            HStack {
-                                Label("Blocked accounts", systemImage: "hand.raised")
-                                    .font(.subheadline)
-                                    .foregroundStyle(Theme.textPrimary)
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(Theme.textSecondary)
-                            }
-                            .padding(14)
-                            .background { GlassCard(cornerRadius: 12) { Color.clear } }
-                        }
-                        .buttonStyle(.plain)
-
-                        deleteAccountRow
-                    }
-                    .padding(.top, 6)
-                    .id("account")
-                }
-
-#if DEBUG
-                developerSection
-#endif
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 110)
-        }
-        .scrollDismissesKeyboard(.interactively)
-        .onChange(of: me.isPrivate) {
-            try? modelContext.save()
-            scheduleProfileSync(me)
-        }
-        .onChange(of: me.name) { scheduleProfileSync(me) }
-        .onChange(of: me.city) { scheduleProfileSync(me) }
-        .onChange(of: me.bio) { scheduleProfileSync(me) }
-        .sheet(isPresented: $showBlockedAccounts) {
-            BlockedAccountsView()
-        }
-#if DEBUG
-        // CLI screenshot hooks, same family as EXPLOG_AUTO_OPEN elsewhere:
-        // the account controls live below the fold, so a screenshot script has
-        // no other way to reach them.
-        //   SIMCTL_CHILD_EXPLOG_AUTO_ACCOUNT=section|blocked|delete
-        .task {
-            guard let hook = ProcessInfo.processInfo.environment["EXPLOG_AUTO_ACCOUNT"] else { return }
-            try? await Task.sleep(for: .seconds(1.2))
-            withAnimation { scrollProxy.scrollTo("account", anchor: .bottom) }
-            try? await Task.sleep(for: .seconds(0.8))
-            switch hook {
-            case "blocked": showBlockedAccounts = true
-            case "delete": confirmingDelete = true
-            default: break
-            }
-        }
-#endif
-        .confirmationDialog("Delete your account?",
-                            isPresented: $confirmingDelete,
-                            titleVisibility: .visible) {
-            Button("Delete everything", role: .destructive) { deleteAccount() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This removes your profile, your logs and their photos and videos, your friends, and your messages. It can't be undone.")
-        }
-        }
-    }
-
-#if DEBUG
-    /// Dev-only controls. Demo content no longer loads automatically for a
-    /// signed-in account (that's what leaked fake friends into real accounts),
-    /// so loading and clearing it is now an explicit action.
-    private var developerSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Developer")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(Theme.textSecondary)
-
-            HStack(spacing: 10) {
-                Button {
-                    SeedData.seed(context: modelContext)
-                } label: {
-                    Label(demoLoaded ? "Demo data loaded" : "Load demo data",
-                          systemImage: demoLoaded ? "checkmark.circle.fill" : "wand.and.stars")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(demoLoaded ? Theme.accent : Theme.textPrimary)
-                }
-                .disabled(demoLoaded)
-
-                Spacer()
-
-                Button(role: .destructive) {
-                    clearDemoData()
-                } label: {
-                    Text("Clear demo").font(.caption.weight(.semibold))
-                }
-                .disabled(!demoLoaded)
-            }
-            .padding(14)
-            .background { GlassCard(cornerRadius: 12) { Color.clear } }
-        }
-        .padding(.top, 6)
-    }
-
-    private var demoLoaded: Bool { friends.contains { $0.isDemo } }
-
-    /// Removes only the seeded rows, leaving the real account intact.
-    ///
-    /// The cleanup itself lives in `SeedData` and is no longer Debug-only —
-    /// a real account gets it automatically on every profile resolve. This
-    /// button is just the manual trigger for a signed-out dev build.
-    private func clearDemoData() {
-        SeedData.purgeDemoData(context: modelContext)
-    }
-#endif
-
-    /// Tear down the Stream session fully, then sign out of Firebase —
-    /// the auth gate flips back to the Welcome screen.
-    private func logOut() {
-        Task { @MainActor in
-            let chatClient = InjectedValues[\.chatClient]
-            if chatClient.currentUserId != nil {
-                await chatClient.logout()
-            }
-            try? Auth.auth().signOut()
-        }
-    }
-
-    // MARK: Delete account (App Store Guideline 5.1.1(v))
-
-    /// Sits below Log out, styled as the destructive thing it is rather than
-    /// hidden behind a support email.
-    private var deleteAccountRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button(role: .destructive) {
-                confirmingDelete = true
-            } label: {
-                HStack {
-                    if deleting {
-                        ProgressView().tint(Theme.accent).scaleEffect(0.8)
-                        Text("Deleting…")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.textSecondary)
-                    } else {
-                        Label("Delete account", systemImage: "trash")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.accent)
-                    }
-                    Spacer()
-                }
-                .padding(14)
-                .background { GlassCard(cornerRadius: 12) { Color.clear } }
-            }
-            .buttonStyle(.plain)
-            .disabled(deleting)
-
-            if let deleteError {
-                Text(deleteError)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 4)
-            }
-        }
-    }
-
-    /// Deletes everything server-side, then follows the exact logout path.
-    ///
-    /// The ordering matters and is the same one the logout invariant depends
-    /// on: sign out and let the auth gate swap to Welcome — which unmounts
-    /// every data-bound view, this one included — and leave the local store
-    /// alone. The next `LocalStore.claim` clears it. Wiping models here would
-    /// fault this very view's `@Bindable me` while it's still on screen, which
-    /// is the "backing data detached from context" crash.
-    private func deleteAccount() {
-        guard !deleting else { return }
-        deleting = true
-        deleteError = nil
-        Task { @MainActor in
-            do {
-                try await FirestoreService.deleteAccount()
-            } catch let error as CallableFunctions.CallableError {
-                deleteError = error.message
-                deleting = false
-                return
-            } catch {
-                deleteError = "Couldn't delete your account. Check your connection and try again."
-                deleting = false
-                return
-            }
-
-            let chatClient = InjectedValues[\.chatClient]
-            if chatClient.currentUserId != nil {
-                await chatClient.logout()
-            }
-            try? Auth.auth().signOut()
-        }
-    }
-
-    /// Pushes a newly picked profile photo to Storage and records its URL on the
-    /// profile. Best-effort, mirroring `LogSync.publish`: the photo is already on
-    /// disk and already showing, so a failed upload must not undo the pick.
-    private func uploadAvatar(fileName: String) {
-        let localURL = URL.documentsDirectory.appending(path: fileName)
-        Task { try? await FirestoreService.uploadAvatarPhoto(at: localURL) }
-    }
-
-    /// Mirrors edited profile fields to Firestore so search and other people's
-    /// views of this account stay in step with what's on screen here. Debounced
-    /// because the fields write to SwiftData on every keystroke.
-    private func scheduleProfileSync(_ me: Friend) {
-        let fields: [String: Any] = [
-            "name": me.name,
-            "city": me.city,
-            "bio": me.bio,
-            "isPrivate": me.isPrivate,
-        ]
-        profileSyncTask?.cancel()
-        profileSyncTask = Task {
-            try? await Task.sleep(for: .milliseconds(800))
-            guard !Task.isCancelled else { return }
-            try? await FirestoreService.updateSoftFields(fields)
-        }
-    }
-
-    private func field(_ label: String, text: Binding<String>,
-                       keyboard: UIKeyboardType = .default) -> some View {
-        HStack {
-            Text(label)
-                .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
-                .frame(width: 90, alignment: .leading)
-            TextField(label, text: text)
-                .keyboardType(keyboard)
-                .foregroundStyle(Theme.textPrimary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background { GlassCard(cornerRadius: 12) { Color.clear } }
     }
 }
 
@@ -704,6 +704,9 @@ struct PublicProfileSheet: View {
             NavigationStack {
                 ChatDetailView(chat: chat) { openChat = nil }
             }
+            // Same as Pulse's quick chat: presented as a cover, so the swipe
+            // back has to be supplied rather than inherited.
+            .swipeRightToDismiss { openChat = nil }
         }
     }
 
@@ -1074,7 +1077,7 @@ private struct HighlightThumbnail: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             if !clip.label.isEmpty {
                 Text(clip.label)
-                    .font(.caption.weight(.semibold))
+                    .font(.logCaption)
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .padding(8)
@@ -1087,5 +1090,55 @@ private struct HighlightThumbnail: View {
         }
         .aspectRatio(1, contentMode: .fill)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+// MARK: - Highlight player
+
+/// A single one of your own logs, full screen and playing.
+///
+/// The other-profile grid redirects into the Places feed instead (see
+/// `PublicProfileSheet.openHighlight`), which is the right move for browsing
+/// someone else's public posts — you land in the feed those posts live in. On
+/// your own profile there is nothing to go and browse: you tapped a specific
+/// log, so this plays that log and nothing else.
+///
+/// Built on `StackedClipPane` so a highlight looks exactly like it does
+/// everywhere else — same caption placement, same hour banner, same reaction
+/// badges. The pane reads its playhead from a `ClipSyncClock`, which the
+/// stacked feeds own per-feed; with one clip there is nothing to synchronize
+/// *with*, but the clock still drives the loop, so this owns one of its own.
+private struct HighlightPlayerView: View {
+    let clip: Clip
+    /// Only used for the avatar orb — the pane deliberately shows no name
+    /// chip for your own log, the same as your pane in the paired feed.
+    let author: Friend?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var clock = ClipSyncClock()
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            StackedClipPane(clip: clip,
+                            authorName: nil,
+                            authorEmoji: author?.emoji ?? "✨",
+                            authorHue: author?.hue ?? 0.58,
+                            roleLabel: "you",
+                            headerTopPadding: 44,
+                            avatarSource: author,
+                            contentMode: .fit)
+                .environment(clock)
+                .ignoresSafeArea()
+        }
+        .overlay(alignment: .topTrailing) {
+            CloseButton(overMedia: true) { dismiss() }
+                .padding(.trailing, 16)
+                .padding(.top, 8)
+        }
+        .onAppear { clock.start() }
+        .onDisappear { clock.stop() }
+        .preferredColorScheme(.dark)
     }
 }

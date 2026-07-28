@@ -2,11 +2,12 @@ const { onCall, onRequest, HttpsError } = require("firebase-functions/v2/https")
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
+const logger = require("firebase-functions/logger");
 const { getAuth } = require("firebase-admin/auth");
 const { getMessaging } = require("firebase-admin/messaging");
 const { StreamChat } = require("stream-chat");
 const { initializeApp } = require("firebase-admin/app");
-const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const { randomInt, createHash } = require("crypto");
 
@@ -1445,6 +1446,12 @@ exports.publishLog = onCall(async (request) => {
     hour: new Date(capturedMs).toISOString().slice(0, 13),
     audience,
     recipientUids,
+    // Engagement counters, maintained by toggleLikeLog / addComment / viewLog.
+    // Initialised here so a fresh log reads as 0 rather than absent, which
+    // would make every client coalesce a missing field into a number anyway.
+    likeCount: 0,
+    commentCount: 0,
+    viewCount: 0,
     spotId,
     spotName: spot ? spot.name : null,
     authorName: author ? author.name || "" : null,
@@ -1461,8 +1468,61 @@ exports.publishLog = onCall(async (request) => {
     });
   }
 
+  // Tell the people this log was actually for.
+  //
+  // Nothing did, before this. Sending a friend a log wrote a doc and stopped —
+  // the only push that ever came out of messaging was the Stream chat webhook,
+  // and a log is not a chat message, so a log sent to somebody who never opened
+  // the app again was never announced to them at all.
+  //
+  // Awaited rather than left running after the response: work that outlives a
+  // v2 function's response can be killed before it finishes. Failures are
+  // swallowed — a log that published is published, whether or not the push
+  // went out.
+  await notifyAboutPublishedLog(uid, { audience, recipientUids, spot }).catch(() => {});
+
   return { id: ref.id, capturedAt: capturedMs, audience, spotId };
 });
+
+/**
+ * Fans out the two notifications a new log can produce.
+ *
+ * A friends-only log tells its named recipients (`logReceived`); a public one
+ * tells the author's friends where they posted (`friendPostedLocation`). They
+ * are mutually exclusive by construction: `recipientUids` is only populated for
+ * a friends-only log, and `spot` only for a public one.
+ */
+async function notifyAboutPublishedLog(uid, { audience, recipientUids, spot }) {
+  const name = await displayName(uid);
+
+  if (audience === "friends") {
+    const recipients = Array.isArray(recipientUids) ? recipientUids : [];
+    await Promise.all(recipients
+      .filter((to) => to && to !== uid)
+      .map((to) => notify(to, {
+        title: name,
+        body: "sent you a log.",
+        data: { type: "log_received", fromUid: uid },
+        prefKey: "logReceived",
+      }).catch(() => {})));
+    return;
+  }
+
+  if (audience === "public") {
+    // Their friends, not their followers: this is the "someone you know just
+    // posted somewhere" signal, and the follow graph is the broadcast one.
+    const friends = await edgeUids(uid, "friends");
+    const where = spot && spot.name ? ` at ${spot.name}` : "";
+    await Promise.all(friends
+      .filter((to) => to && to !== uid)
+      .map((to) => notify(to, {
+        title: name,
+        body: `just posted${where}.`,
+        data: { type: "friend_posted_location", fromUid: uid },
+        prefKey: "friendPostedLocation",
+      }).catch(() => {})));
+  }
+}
 
 /** Shapes a stored log doc for the wire, including its denormalised author. */
 function publicLogPayload(log) {
@@ -1484,6 +1544,10 @@ function publicLogPayload(log) {
     capturedAt: log.capturedAt && log.capturedAt.toMillis
       ? log.capturedAt.toMillis()
       : Date.now(),
+    // Absent on logs published before engagement existed, hence the coalesce.
+    likeCount: Math.max(0, Number(log.likeCount) || 0),
+    commentCount: Math.max(0, Number(log.commentCount) || 0),
+    viewCount: Math.max(0, Number(log.viewCount) || 0),
   };
 }
 
@@ -1522,10 +1586,22 @@ async function publicLogsFor(uid, { spotId = null, limit = 60 } = {}) {
     if (snapshot.exists) hidden.add(authors[index]);
   });
 
-  return rows
+  const visible = rows
     .filter((log) => !hidden.has(log.authorUid))
-    .map(publicLogPayload)
     .slice(0, limit);
+  if (!visible.length) return [];
+
+  // Whether *this* viewer has liked each row. One batched `getAll` over the
+  // page's addressed like docs — the alternative is storing a liker array on
+  // the log, which is the write contention the subcollection exists to avoid.
+  const likes = await db.getAll(
+    ...visible.map((log) => db.doc(`logs/${log.id}/likes/${uid}`))
+  );
+
+  return visible.map((log, index) => ({
+    ...publicLogPayload(log),
+    likedByMe: likes[index].exists,
+  }));
 }
 
 /**
@@ -1587,13 +1663,21 @@ exports.listFriendLogs = onCall(async (request) => {
     chunks.push(visible.slice(i, i + 30));
   }
 
-  const snaps = await Promise.all(chunks.map((chunk) =>
-    db.collection("logs")
-      .where("authorUid", "in", chunk)
-      .orderBy("capturedAt", "desc")
-      .limit(limit)
-      .get()
-  ));
+  // Optional delta cursor (millis). The client takes the full page on a cold
+  // launch and periodically after, and asks for just the tail in between —
+  // re-shipping the same 80 logs on every Pulse appearance was pure waste.
+  // Range and order are both on `capturedAt`, so this needs no index beyond
+  // the authorUid+capturedAt one the query already uses.
+  const sinceMillis = Number((request.data || {}).since);
+  const hasCursor = Number.isFinite(sinceMillis) && sinceMillis > 0;
+
+  const snaps = await Promise.all(chunks.map((chunk) => {
+    let query = db.collection("logs").where("authorUid", "in", chunk);
+    if (hasCursor) {
+      query = query.where("capturedAt", ">", Timestamp.fromMillis(sinceMillis));
+    }
+    return query.orderBy("capturedAt", "desc").limit(limit).get();
+  }));
 
   const logs = snaps
     .flatMap((snap) => snap.docs.map((doc) => doc.data()))
@@ -1623,11 +1707,260 @@ exports.listFriendLogs = onCall(async (request) => {
       capturedAt: log.capturedAt && log.capturedAt.toMillis
         ? log.capturedAt.toMillis()
         : Date.now(),
+      // A view is a view regardless of audience, so a friends-only log carries
+      // its count too — unlike likes and comments, which are public-post only.
+      viewCount: Math.max(0, Number(log.viewCount) || 0),
     }))
     .sort((a, b) => b.capturedAt - a.capturedAt)
     .slice(0, limit);
 
   return { logs };
+});
+
+// ---------------------------------------------------------------------------
+// Engagement: likes, comments, views
+//
+// `logs/{logId}/likes/{uid}`      — existence is the like
+// `logs/{logId}/comments/{id}`    — { authorUid, author* (denormalised), text }
+// `logs/{logId}.likeCount|commentCount|viewCount` — counters on the parent
+//
+// Likes are one document per liker rather than an array field on the log. An
+// array is a single document every liker has to write, so two people liking the
+// same clip at the same moment overwrite each other; addressed per-uid docs
+// can't collide, and they make "did *I* like this" a point read instead of a
+// scan. The counters are `FieldValue.increment`, so they're correct under
+// concurrency without anyone holding a lock on the log.
+//
+// All of this went through the client's own SwiftData store before, which meant
+// a like or a comment only ever existed on the device that made it.
+// ---------------------------------------------------------------------------
+
+const COMMENT_MAX = 300;
+
+/**
+ * Whether `uid` is allowed to see — and therefore engage with — a log.
+ *
+ * The same rule `listFriendLogs` and `publicLogsFor` read with: a public post is
+ * for everyone, a friends-only one is for the people it was addressed to, and
+ * the author always sees their own. Engagement has to agree with visibility or
+ * a log nobody can see still accumulates likes from people who can't see it.
+ */
+function canSeeLog(log, uid) {
+  if (log.authorUid === uid) return true;
+  if (log.audience === "public") return true;
+  return Array.isArray(log.recipientUids) && log.recipientUids.includes(uid);
+}
+
+/**
+ * Loads a log the caller may engage with, or throws.
+ *
+ * Blocking is checked in both directions and reported as `not-found` rather
+ * than `permission-denied`: which logs exist is itself information, and a
+ * blocked account shouldn't be able to probe for one.
+ */
+async function engageableLog(uid, logId) {
+  const snap = await db.doc(`logs/${logId}`).get();
+  if (!snap.exists) throw new HttpsError("not-found", "That log isn't available.");
+  const log = snap.data();
+
+  if (!canSeeLog(log, uid)) {
+    throw new HttpsError("not-found", "That log isn't available.");
+  }
+
+  if (log.authorUid !== uid) {
+    const [iBlockedThem, theyBlockedMe] = await Promise.all([
+      blockedRef(uid, log.authorUid).get(),
+      blockedRef(log.authorUid, uid).get(),
+    ]);
+    if (iBlockedThem.exists || theyBlockedMe.exists) {
+      throw new HttpsError("not-found", "That log isn't available.");
+    }
+  }
+
+  return log;
+}
+
+/** Shapes a stored comment for the wire. */
+function commentPayload(comment) {
+  return {
+    id: comment.id,
+    authorUid: comment.authorUid || "",
+    authorName: comment.authorName || "",
+    authorHandle: comment.authorHandle || "",
+    authorAvatarEmoji: comment.authorAvatarEmoji || "🙂",
+    authorAvatarURL: comment.authorAvatarURL || "",
+    text: comment.text || "",
+    sentAt: comment.sentAt && comment.sentAt.toMillis
+      ? comment.sentAt.toMillis()
+      : Date.now(),
+  };
+}
+
+/**
+ * Callable: toggleLikeLog({ logId }) -> { liked, likeCount }
+ *
+ * One transaction so the like document and the counter can never disagree —
+ * a double-tap that raced itself used to be able to increment twice off a
+ * single like.
+ */
+exports.toggleLikeLog = onCall(async (request) => {
+  const uid = requireAuth(request);
+  const logId = requireUidArg((request.data || {}).logId, "logId");
+  await engageableLog(uid, logId);
+
+  const logRef = db.doc(`logs/${logId}`);
+  const likeRef = db.doc(`logs/${logId}/likes/${uid}`);
+
+  const liked = await db.runTransaction(async (tx) => {
+    const existing = await tx.get(likeRef);
+    if (existing.exists) {
+      tx.delete(likeRef);
+      tx.update(logRef, { likeCount: FieldValue.increment(-1) });
+      return false;
+    }
+    tx.set(likeRef, { uid, createdAt: FieldValue.serverTimestamp() });
+    tx.update(logRef, { likeCount: FieldValue.increment(1) });
+    return true;
+  });
+
+  // Read back rather than deriving: another liker may have landed in between,
+  // and the client is about to render this number as the truth.
+  const after = await logRef.get();
+  const likeCount = Math.max(0, Number((after.data() || {}).likeCount) || 0);
+  return { liked, likeCount };
+});
+
+/**
+ * Callable: addComment({ logId, text }) -> { comment, commentCount }
+ *
+ * The author's name and avatar are denormalised onto the comment at write time,
+ * for the same reason `publishLog` denormalises a public post's author: the
+ * Places feed renders comments from people the viewer has no relationship with,
+ * and resolving a profile per comment would be a fan-out on every open.
+ */
+exports.addComment = onCall(async (request) => {
+  const uid = requireAuth(request);
+  const data = request.data || {};
+  const logId = requireUidArg(data.logId, "logId");
+  const text = cleanText(data.text, COMMENT_MAX);
+  if (!text) {
+    throw new HttpsError("invalid-argument", "A comment needs some text.");
+  }
+  await engageableLog(uid, logId);
+
+  const me = await db.doc(`users/${uid}`).get();
+  const profile = me.exists ? me.data() : {};
+
+  const logRef = db.doc(`logs/${logId}`);
+  const ref = logRef.collection("comments").doc();
+  const comment = {
+    id: ref.id,
+    authorUid: uid,
+    authorName: profile.name || "",
+    authorHandle: profile.handleDisplay || profile.handle || "",
+    authorAvatarEmoji: profile.avatarEmoji || "🙂",
+    authorAvatarURL: profile.avatarURL || "",
+    text,
+    sentAt: FieldValue.serverTimestamp(),
+  };
+
+  await ref.set(comment);
+  await logRef.update({ commentCount: FieldValue.increment(1) }).catch(() => {});
+
+  const after = await logRef.get();
+  const commentCount = Math.max(0, Number((after.data() || {}).commentCount) || 0);
+  // The stored `sentAt` is a server sentinel that hasn't resolved on this side
+  // of the write, so stamp the response with now — the client is inserting this
+  // comment into a list it's already showing.
+  return { comment: { ...commentPayload(comment), sentAt: Date.now() }, commentCount };
+});
+
+/**
+ * Callable: listComments({ logId, limit }) -> { comments, commentCount }
+ *
+ * Oldest first, matching the order the comments sheet already reads in.
+ */
+exports.listComments = onCall(async (request) => {
+  const uid = requireAuth(request);
+  const data = request.data || {};
+  const logId = requireUidArg(data.logId, "logId");
+  const limit = Math.min(Math.max(Number(data.limit) || 100, 1), 300);
+  await engageableLog(uid, logId);
+
+  const snap = await db.collection(`logs/${logId}/comments`)
+    .orderBy("sentAt", "asc")
+    .limit(limit)
+    .get();
+
+  const rows = snap.docs.map((doc) => doc.data());
+  if (!rows.length) return { comments: [], commentCount: 0 };
+
+  // Same both-directions block filter the feeds use, batched over the distinct
+  // commenters on this page rather than one read per comment.
+  const authors = [...new Set(rows.map((row) => row.authorUid).filter(Boolean))];
+  const [blockedUids, reverse] = await Promise.all([
+    edgeUids(uid, "blocked"),
+    authors.length
+      ? db.getAll(...authors.map((author) => blockedRef(author, uid)))
+      : Promise.resolve([]),
+  ]);
+
+  const hidden = new Set(blockedUids);
+  reverse.forEach((snapshot, index) => {
+    if (snapshot.exists) hidden.add(authors[index]);
+  });
+
+  const comments = rows
+    .filter((row) => !hidden.has(row.authorUid))
+    .map(commentPayload);
+
+  return { comments, commentCount: comments.length };
+});
+
+/**
+ * Callable: viewLog({ logId }) -> { viewCount }
+ *
+ * Counts one view of somebody else's log. Modelled on `publicProfileFor`'s
+ * `viewerCount`: the author's own views never count, and the increment is
+ * fire-and-forget with the new value reflected in this response, so nobody
+ * waits on a write to watch a video.
+ *
+ * De-duplication per session is the client's job — see `EngagementSync.markViewed`.
+ * Doing it here would mean a permanent per-viewer record on every log, which is
+ * a lot of storage to answer a question nobody asks.
+ */
+exports.viewLog = onCall(async (request) => {
+  const uid = requireAuth(request);
+  const logId = requireUidArg((request.data || {}).logId, "logId");
+  const log = await engageableLog(uid, logId);
+
+  const current = Math.max(0, Number(log.viewCount) || 0);
+  if (log.authorUid === uid) return { viewCount: current };
+
+  db.doc(`logs/${logId}`).update({ viewCount: FieldValue.increment(1) }).catch(() => {});
+  return { viewCount: current + 1 };
+});
+
+/**
+ * Callable: logStats({ logId }) -> { likeCount, commentCount, viewCount }
+ *
+ * The counters for one log, for the author's own insights screen.
+ *
+ * This exists because `listFriendLogs` queries logs authored by the caller's
+ * *friends* — your own logs never come back through it, so nothing in the sync
+ * layer would ever bring your own view count home. Insights is the one screen
+ * that needs it, and it needs exactly one log's worth.
+ */
+exports.logStats = onCall(async (request) => {
+  const uid = requireAuth(request);
+  const logId = requireUidArg((request.data || {}).logId, "logId");
+  const log = await engageableLog(uid, logId);
+
+  return {
+    likeCount: Math.max(0, Number(log.likeCount) || 0),
+    commentCount: Math.max(0, Number(log.commentCount) || 0),
+    viewCount: Math.max(0, Number(log.viewCount) || 0),
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -1787,7 +2120,10 @@ exports.deleteLog = onCall(async (request) => {
   if (storagePath) {
     await getStorage().bucket().file(storagePath).delete().catch(() => {});
   }
-  await ref.delete();
+  // Deleting a document does not delete what hangs off it. Without this the
+  // likes and comments outlive the log they belong to — invisible, unreachable,
+  // and still holding the commenters' names.
+  await db.recursiveDelete(ref).catch(() => ref.delete());
   return { ok: true };
 });
 
@@ -2001,8 +2337,34 @@ exports.joinBeacon = onCall(async (request) => {
     return next;
   });
 
+  // Tell the host somebody's coming. Nothing about beacons notified anybody
+  // before this, which for a feature about meeting up at a time is the one
+  // place a push actually earns itself.
+  //
+  // Only on a join that changed the roster: `joinBeacon` is idempotent, so a
+  // retried request must not buzz the host a second time.
+  if (joinedUids.includes(uid)) {
+    await notifyBeaconHost(beaconId, uid).catch(() => {});
+  }
+
   return { joinedUids };
 });
+
+/** Notifies a beacon's host that `joinerUid` just joined. */
+async function notifyBeaconHost(beaconId, joinerUid) {
+  const snap = await db.doc(`beacons/${beaconId}`).get();
+  if (!snap.exists) return;
+  const beacon = snap.data();
+  if (!beacon.hostUid || beacon.hostUid === joinerUid) return;
+
+  const name = await displayName(joinerUid);
+  await notify(beacon.hostUid, {
+    title: "Someone's in",
+    body: `${name} joined ${beacon.spotName || "your beacon"}.`,
+    data: { type: "beacon_join", beaconId, fromUid: joinerUid },
+    prefKey: "beaconActivity",
+  });
+}
 
 /**
  * Callable: leaveBeacon({ beaconId }) -> { joinedUids }
@@ -2150,11 +2512,42 @@ exports.deleteBeacon = onCall(async (request) => {
  *
  * `data` travels alongside the alert and is what the client's `PushDestination`
  * decodes to decide where a tap should land.
+ *
+ * `prefKey` names the category in Settings this send belongs to, and is checked
+ * here rather than at each call site so a new trigger cannot forget to honour
+ * the switch. Keys match `NotificationCategory.rawValue` on the client.
+ *
+ * A missing `notificationPrefs` map, or a missing key inside it, counts as ON.
+ * Every account created before preferences existed has no map at all, and
+ * reading that as OFF would silently stop notifying the entire existing user
+ * base. Only an explicit `false` suppresses anything.
  */
-async function notify(uid, { title, body, data = {} }) {
+async function notificationsAllowed(uid, prefKey) {
+  if (!prefKey) return true;
+  const snap = await db.doc(`users/${uid}`).get().catch(() => null);
+  if (!snap || !snap.exists) return true;
+  const prefs = snap.data().notificationPrefs;
+  if (!prefs || typeof prefs !== "object") return true;
+  return prefs[prefKey] !== false;
+}
+
+async function notify(uid, { title, body, data = {}, prefKey = null }) {
+  // Every exit below is logged. A push that never arrives is invisible from
+  // the device — there is no bounce and no user-facing error — so the server
+  // log is the only place the reason can ever show up. Silence here meant
+  // "suppressed by a preference", "nobody has registered a device" and "APNs
+  // rejected the message" all looked identical from the outside: nothing.
+  if (!(await notificationsAllowed(uid, prefKey))) {
+    logger.info("notify: suppressed by preference", { uid, prefKey });
+    return;
+  }
+
   const devices = await db.collection(`users/${uid}/devices`).get();
   const tokens = devices.docs.map((doc) => doc.id).filter(Boolean);
-  if (!tokens.length) return;
+  if (!tokens.length) {
+    logger.warn("notify: no registered devices", { uid, prefKey });
+    return;
+  }
 
   const response = await getMessaging().sendEachForMulticast({
     tokens,
@@ -2168,13 +2561,43 @@ async function notify(uid, { title, body, data = {} }) {
 
   // Drop tokens the service says are gone (app deleted, token rotated).
   const dead = [];
+  // Everything else FCM reports per token. `sendEachForMulticast` resolves
+  // successfully even when every individual send failed, so the call not
+  // throwing says nothing about delivery — the per-response errors are the
+  // only signal, and they were being discarded for every code except the two
+  // handled below. `messaging/third-party-auth-error` in particular is what
+  // FCM returns when the APNs auth key is missing, expired, or signed for a
+  // different bundle id: the single most likely cause of "the backend says it
+  // sent and the phone never rings", and it was landing in silence.
+  const failures = [];
   response.responses.forEach((result, index) => {
     const code = result.error && result.error.code;
+    if (!code) return;
     if (code === "messaging/registration-token-not-registered"
         || code === "messaging/invalid-registration-token") {
       dead.push(tokens[index]);
+    } else {
+      failures.push(code);
     }
   });
+
+  if (failures.length) {
+    logger.error("notify: FCM rejected sends", {
+      uid,
+      prefKey,
+      failureCount: failures.length,
+      codes: [...new Set(failures)],
+    });
+  }
+  logger.info("notify: sent", {
+    uid,
+    prefKey,
+    tokens: tokens.length,
+    success: response.successCount,
+    failure: response.failureCount,
+    dropped: dead.length,
+  });
+
   await Promise.all(dead.map((token) =>
     db.doc(`users/${uid}/devices/${token}`).delete().catch(() => {})
   ));
@@ -2203,6 +2626,7 @@ exports.onFriendRequest = onDocumentCreated(
       title: "New friend request",
       body: `${name} wants to be friends on Ralli.`,
       data: { type: "friend_request", fromUid },
+      prefKey: "friendRequests",
     });
   }
 );
@@ -2229,6 +2653,7 @@ exports.onFriendAccepted = onDocumentCreated(
       title: "You're now friends",
       body: `${name} accepted your friend request.`,
       data: { type: "friend_accepted", friendUid },
+      prefKey: "friendRequests",
     });
   }
 );
@@ -2283,6 +2708,7 @@ exports.streamMessageWebhook = onRequest(
         title: name,
         body: text.slice(0, 140),
         data: { type: "message", channelId, fromUid: senderId || "" },
+        prefKey: "chatMessages",
       });
     }));
 
@@ -2326,6 +2752,60 @@ exports.streakReminder = onSchedule(
       title: "Your streak is about to break",
       body: "Post a log before midnight to keep it alive.",
       data: { type: "streak" },
+      prefKey: "streakReminder",
+    }).catch(() => {})));
+  }
+);
+
+/**
+ * Scheduled: the hourly nudge to log.
+ *
+ * Ralli's whole cadence is hourly — one log per chat per clock hour — and
+ * nothing reminded anyone of it. `streakReminder` above is a different thing
+ * and stays: it fires once, in the evening, and only about a streak that is
+ * actually about to lapse. This one is about the hour you're in.
+ *
+ * Waking hours only. Firing every hour round the clock would push at 3am,
+ * which reads as spam however good the intent — so it runs 9am to 9pm and
+ * nothing outside that window. Recipients switch it off under
+ * Settings → Notifications → Hourly reminders.
+ *
+ * Scoped to people who have logged in the past week rather than to every
+ * account that ever existed: nudging a dormant account hourly is the same
+ * spam by another route, and it keeps the fan-out proportional to how many
+ * people are actually using the app.
+ */
+exports.hourlyLogReminder = onSchedule(
+  { schedule: "0 9-21 * * *", timeZone: "America/Los_Angeles" },
+  async () => {
+    const now = Date.now();
+    const hourStart = new Date(now);
+    hourStart.setMinutes(0, 0, 0);
+    const weekStart = new Date(now - 7 * 24 * 3600 * 1000);
+
+    const recentLogs = await db.collection("logs")
+      .where("capturedAt", ">=", weekStart)
+      .get();
+
+    const active = new Set();
+    const loggedThisHour = new Set();
+    recentLogs.docs.forEach((doc) => {
+      const log = doc.data();
+      if (!log.authorUid) return;
+      active.add(log.authorUid);
+      const capturedAt = log.capturedAt && log.capturedAt.toMillis
+        ? log.capturedAt.toMillis()
+        : 0;
+      if (capturedAt >= hourStart.getTime()) loggedThisHour.add(log.authorUid);
+    });
+
+    const due = [...active].filter((uid) => !loggedThisHour.has(uid));
+
+    await Promise.all(due.map((uid) => notify(uid, {
+      title: "What are you up to?",
+      body: "You haven't logged this hour yet.",
+      data: { type: "hourly_reminder" },
+      prefKey: "hourlyReminder",
     }).catch(() => {})));
   }
 );
@@ -2337,7 +2817,13 @@ exports.streakReminder = onSchedule(
  * it upserts a matching Stream user (id = Firebase uid) and returns a token.
  * The user never sees Stream — chat just works.
  */
-exports.getStreamToken = onCall({ secrets: [streamApiSecret] }, async (request) => {
+// `minInstances` on both Stream callables: they are bound to a Secret Manager
+// secret, so a cold instance pays the secret fetch on top of the usual cold
+// start — and both sit directly in front of user-visible chat actions (token
+// on launch, join on a channel's first open). One warm instance each keeps
+// that off the critical path. It is a standing cost; drop it back to 0 if the
+// beta window closes or these stop being latency-sensitive.
+exports.getStreamToken = onCall({ secrets: [streamApiSecret], minInstances: 1 }, async (request) => {
   const auth = request.auth;
   if (!auth) {
     throw new HttpsError("unauthenticated", "Sign in first.");
@@ -2381,7 +2867,7 @@ exports.getStreamToken = onCall({ secrets: [streamApiSecret] }, async (request) 
  * server secret so it always works, whether the channel is brand new or
  * was created earlier (e.g. by a different test account) without this user.
  */
-exports.joinStreamChannel = onCall({ secrets: [streamApiSecret] }, async (request) => {
+exports.joinStreamChannel = onCall({ secrets: [streamApiSecret], minInstances: 1 }, async (request) => {
   const auth = request.auth;
   if (!auth) {
     throw new HttpsError("unauthenticated", "Sign in first.");

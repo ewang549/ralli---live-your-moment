@@ -94,6 +94,11 @@ struct RemoteProfile: Codable, Identifiable, Hashable {
     var followerCount: Int? = nil
     /// Storage download URL for the profile photo. Empty when none is set.
     var avatarURL: String? = nil
+    /// Which push categories this account wants, keyed by
+    /// `NotificationCategory.rawValue`. Nil on a profile written before
+    /// preferences existed, which means "everything" — see
+    /// `Friend.wantsNotification`.
+    var notificationPrefs: [String: Bool]? = nil
 
     var id: String { uid }
     /// Follower total, with the "server predates the counter" case folded in.
@@ -240,7 +245,8 @@ enum FirestoreService {
             friendCode: data["friendCode"] as? String,
             viewerCount: data["viewerCount"] as? Int ?? 0,
             followerCount: data["followerCount"] as? Int ?? 0,
-            avatarURL: data["avatarURL"] as? String ?? ""
+            avatarURL: data["avatarURL"] as? String ?? "",
+            notificationPrefs: data["notificationPrefs"] as? [String: Bool]
         )
     }
 
@@ -469,6 +475,16 @@ enum FirestoreService {
         _ = try await CallableFunctions.call("deleteAccount", as: OKResponse.self)
     }
 
+    /// Removes one published log and its media from the server.
+    ///
+    /// Authors only — the server checks the stored `authorUid` rather than
+    /// anything the caller supplies, so this can't be pointed at someone
+    /// else's log. Deleting a log that's already gone is a no-op, which makes a
+    /// retry after a dropped connection safe.
+    static func deleteLog(id: String) async throws {
+        _ = try await CallableFunctions.call("deleteLog", data: ["id": id], as: OKResponse.self)
+    }
+
     static func checkHandleAvailable(_ handle: String) async throws -> HandleAvailability {
         try await CallableFunctions.call("checkHandleAvailable",
                                          data: ["handle": handle],
@@ -598,6 +614,14 @@ enum FirestoreService {
         // it here too means your own avatar survives a reinstall, where the
         // locally-picked file is gone but the uploaded copy isn't.
         friend.avatarURL = profile.avatarURL ?? ""
+        // The server's copy is the one that decides whether a push is sent, so
+        // it wins here — otherwise signing in on a second device would show
+        // every switch on while the backend was honouring the ones turned off.
+        // Nil means the account predates preferences and wants everything,
+        // which an empty map already says.
+        if let prefs = profile.notificationPrefs {
+            friend.notificationPrefs = prefs
+        }
 
         try? context.save()
 
