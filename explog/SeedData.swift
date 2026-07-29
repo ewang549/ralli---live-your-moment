@@ -21,8 +21,38 @@ enum SeedData {
         let forced = ProcessInfo.processInfo.environment["EXPLOG_SEED_DEMO"] == "1"
         guard forced || session.isConfirmedSignedOut else { return }
         seed(context: context)
+        seedExpiredBeaconIfRequested(context: context)
 #endif
     }
+
+#if DEBUG
+    /// CLI verification hook: SIMCTL_CHILD_EXPLOG_SEED_EXPIRED_BEACON=1
+    ///
+    /// Writes one beacon well past its window and one comfortably inside it,
+    /// both already in the local store — which is the case that was broken.
+    /// The server stops returning an expired beacon, so a fresh install never
+    /// showed one; a device that had already synced it showed it forever, and
+    /// there was no way to reproduce that without waiting six hours.
+    @MainActor
+    private static func seedExpiredBeaconIfRequested(context: ModelContext) {
+        guard ProcessInfo.processInfo.environment["EXPLOG_SEED_EXPIRED_BEACON"] == "1" else { return }
+
+        let friends = (try? context.fetch(FetchDescriptor<Friend>())) ?? []
+        let host = friends.first { $0.isMe } ?? friends.first
+
+        let expired = Beacon(spot: nil, host: host, note: "EXPIRED SEED",
+                             startsAt: .now.addingTimeInterval(-Beacon.lifetime - 3600),
+                             capacity: 6)
+        expired.isPublic = true
+        let live = Beacon(spot: nil, host: host, note: "LIVE SEED",
+                          startsAt: .now.addingTimeInterval(1800), capacity: 6)
+        live.isPublic = true
+
+        context.insert(expired)
+        context.insert(live)
+        try? context.save()
+    }
+#endif
 
     /// Removes every seeded row from the local store, leaving the real account
     /// and real friends untouched. Returns whether anything was actually there.

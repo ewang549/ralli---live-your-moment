@@ -126,6 +126,12 @@ final class LogSync {
                 payload["storagePath"] = storagePath
                 payload["mediaURL"] = mediaURL
             }
+            // The server's idempotency key. Falls back to the clip's own id for
+            // rows written before `clientRequestID` existed — either way it's
+            // stable across retries, which is the only property that matters.
+            payload["clientRequestId"] = clip.clientRequestID.isEmpty
+                ? clip.id.uuidString
+                : clip.clientRequestID
             payload["audience"] = audience.wireValue
             if let spotID = audience.spotID {
                 payload["spotId"] = spotID
@@ -151,7 +157,18 @@ final class LogSync {
             clip.remoteURLString = mediaURL
             clip.authorUID = uid
             clip.publishFailed = false
-            try? context.save()
+            // Not `try?`. If this save fails the clip still reads as
+            // unpublished, so the next `publishPending` sweep re-sends it —
+            // harmless now that the server deduplicates, but the reason the
+            // duplicate ever appeared, and previously invisible.
+            do {
+                try context.save()
+            } catch {
+                syncLog.error("""
+                    published log \(response.id, privacy: .public) but failed to \
+                    persist its id: \(error.localizedDescription, privacy: .public)
+                    """)
+            }
             syncLog.info("published log \(response.id, privacy: .public)")
         } catch {
             // The capture stays on the device either way — that's the point of

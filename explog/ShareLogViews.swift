@@ -293,6 +293,16 @@ struct PublicPlacePostView: View {
     @State private var audience: PostAudience = .everyone
     @State private var showSpotSearch = false
 
+    /// True from the instant Post is tapped. `dismiss()` doesn't take the
+    /// button off screen until SwiftUI gets round to it, so without this a
+    /// fast second tap ran `post()` again and wrote a second clip.
+    @State private var isSending = false
+
+    /// Identifies the capture this composer is posting, not the clip row it
+    /// writes — so if a double tap does slip through, both attempts carry the
+    /// same key and the server keeps one log.
+    @State private var requestID = UUID().uuidString
+
     @State private var emoji = "✨"
     @State private var hueA = Double.random(in: 0...1)
 
@@ -319,6 +329,10 @@ struct PublicPlacePostView: View {
     /// A placed post needs somewhere to land — the Places feed is organised by
     /// place, and an unplaced post has no home.
     private var canPost: Bool { spot?.remoteID.isEmpty == false }
+
+    /// What the button actually obeys: having a place is necessary, but a send
+    /// already on its way is the other reason not to start another one.
+    private var canTapPost: Bool { canPost && !isSending }
 
     var body: some View {
         NavigationStack {
@@ -370,8 +384,9 @@ struct PublicPlacePostView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
                         .background(Capsule().fill(canPost ? Theme.coral : Theme.sunken))
+                        .opacity(isSending ? 0.6 : 1)
                 }
-                .disabled(!canPost)
+                .disabled(!canTapPost)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 12)
             }
@@ -441,7 +456,10 @@ struct PublicPlacePostView: View {
     /// The `SpotClip` is stamped with the server's log id afterwards so the next
     /// public sync updates that row instead of adding a duplicate.
     private func post() {
-        guard let spot, !spot.remoteID.isEmpty else { return }
+        guard !isSending, let spot, !spot.remoteID.isEmpty else { return }
+        // Closes the door before anything else runs: `.disabled` only takes
+        // effect on the next SwiftUI update, this takes effect now.
+        isSending = true
         // Same as a friends-only log: no caption means no caption.
         let finalLabel = name
         let hueB = (hueA + 0.15).truncatingRemainder(dividingBy: 1)
@@ -452,6 +470,8 @@ struct PublicPlacePostView: View {
         // Recorded for both audiences: the place is where this was filmed, and
         // that stays true whoever ends up seeing it.
         clip.intendedSpotID = spot.remoteID
+        // Keyed to the capture, not to this row — see `requestID`.
+        clip.clientRequestID = requestID
         clip.videoAspectRatio = aspectRatio
         clip.isMuted = isMuted
         modelContext.insert(clip)

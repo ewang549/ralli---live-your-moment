@@ -44,6 +44,22 @@ service firebase.storage {
       allow delete: if signedIn() && request.auth.uid == uid;
     }
 
+    // beacons/{uid}/{file} — the cover photo on an activity the user hosts.
+    //
+    // Same shape and cap as an avatar: one compressed JPEG, written only under
+    // the host's own prefix, which is what createBeacon re-checks before it will
+    // record a beacon pointing at a path. Readable by any signed-in user — a
+    // public beacon's cover is shown to strangers by design, and a friends-only
+    // one is gated by listFriendBeacons deciding who gets the URL at all.
+    match /beacons/{uid}/{file} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+                   && request.auth.uid == uid
+                   && request.resource.size < 8 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
     // Anything not matched above.
     match /{allPaths=**} {
       allow read, write: if false;

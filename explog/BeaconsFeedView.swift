@@ -31,10 +31,18 @@ struct BeaconsFeedView: View {
     /// `Friend` row, i.e. an actual friend (or you), so a stranger's public
     /// beacon still stays out of it.
     private var filtered: [Beacon] {
-        beacons
-            .filter { segment == .publicFeed ? $0.isPublic : $0.host != nil }
+        live.filter { segment == .publicFeed ? $0.isPublic : $0.host != nil }
             .sorted { $0.startsAt < $1.startsAt }
     }
+
+    /// Beacons still worth showing.
+    ///
+    /// The server already stops returning a beacon six hours past its start, but
+    /// that only governs what arrives — a row already in the local store kept
+    /// rendering forever, so yesterday's plans piled up at the top of the feed.
+    /// Filtering here rather than waiting on a sync means an activity drops off
+    /// the moment its window closes, even offline.
+    private var live: [Beacon] { beacons.filter { !$0.isExpired } }
 
     var body: some View {
         ZStack {
@@ -48,8 +56,8 @@ struct BeaconsFeedView: View {
                 // Counts read off the same rules `filtered` applies, or the
                 // badge promises rows the segment won't show.
                 BeaconSegments(segment: $segment,
-                               friendsCount: beacons.filter { $0.host != nil }.count,
-                               publicCount: beacons.filter { $0.isPublic }.count)
+                               friendsCount: live.filter { $0.host != nil }.count,
+                               publicCount: live.filter { $0.isPublic }.count)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 14)
 
@@ -394,7 +402,20 @@ struct BeaconFeedCard: View {
     private var hero: some View {
         ZStack(alignment: .bottomLeading) {
             Group {
-                if let spot = beacon.spot {
+                if beacon.hasCoverImage {
+                    // The host's own photo wins over the place's generated art —
+                    // it's the more specific answer to "what is this plan".
+                    CachedImage(localURL: beacon.coverImageLocalURL,
+                                remoteURL: beacon.coverImageRemoteURL) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Theme.accentGradient
+                    }
+                    // Named so a UI test can tell a cover from the vibe art it
+                    // replaces — nothing else about the two is distinguishable
+                    // from outside the app.
+                    .accessibilityIdentifier("beacon-cover")
+                } else if let spot = beacon.spot {
                     VibeClipView(emoji: spot.emoji, label: spot.name,
                                  hueA: spot.hueA, hueB: spot.hueB, animate: false)
                 } else {
@@ -621,6 +642,23 @@ struct ActivityDetailSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    // The host's cover, when there is one — the same picture the
+                    // feed card leads with, at the size a detail view can afford.
+                    // Absent for every beacon posted without one, which is why
+                    // this is a plain `if` rather than a placeholder.
+                    if beacon.hasCoverImage {
+                        CachedImage(localURL: beacon.coverImageLocalURL,
+                                    remoteURL: beacon.coverImageRemoteURL) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            Theme.accentGradient
+                        }
+                        .frame(height: 200)
+                        .frame(maxWidth: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .accessibilityIdentifier("beacon-cover-detail")
+                    }
+
                     // When it happens, first thing on the page. This is the
                     // "more details" view and it used to be the one screen that
                     // never said when the activity was — you could read the
@@ -922,7 +960,11 @@ struct MyActivitiesSheet: View {
     private var me: Friend? { friends.first { $0.isMe } }
     private var mine: [Beacon] {
         guard let me else { return [] }
-        return beacons.filter { $0.isAttending(me) }.sorted { $0.startsAt < $1.startsAt }
+        // Expired activities drop off here for the same reason they do on the
+        // feed: an RSVP to something that finished yesterday isn't a plan.
+        return beacons
+            .filter { $0.isAttending(me) && !$0.isExpired }
+            .sorted { $0.startsAt < $1.startsAt }
     }
 
     var body: some View {
@@ -999,6 +1041,9 @@ struct NewActivitySheet: View {
     @State private var capacity = 8
     @State private var isPublic = true
     @State private var showPrivacyAlert = false
+    /// The picked cover, already saved into Documents. Empty means the card
+    /// falls back to the place's vibe art, exactly as it always did.
+    @State private var coverFileName = ""
     /// When the plan actually happens. Defaults to two hours out — the same
     /// value this sheet used to hardcode into the `Beacon` initializer, so an
     /// untouched picker creates exactly the beacon it always did.
@@ -1036,6 +1081,13 @@ struct NewActivitySheet: View {
                             }
                         }
                     }
+                }
+                Section {
+                    coverPicker
+                } header: {
+                    Text("Cover photo")
+                } footer: {
+                    Text("Optional. Without one the card uses the place's artwork.")
                 }
                 Section("Details") {
                     TextField("What's the plan?", text: $note, axis: .vertical)
@@ -1081,6 +1133,53 @@ struct NewActivitySheet: View {
         }
     }
 
+    /// Shows the picked cover at the shape it will actually appear in, so the
+    /// framing the hero's centre-crop lands on is no surprise.
+    private var coverPicker: some View {
+        CoverPhotoButton(onPicked: { coverFileName = $0 ?? "" },
+                         canRemove: !coverFileName.isEmpty) {
+            ZStack {
+                if coverFileName.isEmpty {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Theme.baseElevated)
+                    VStack(spacing: 6) {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.system(size: 24, weight: .semibold))
+                        Text("Add a cover photo")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundStyle(Theme.accent)
+                } else {
+                    CachedImage(localURL: URL.documentsDirectory.appending(path: coverFileName),
+                                remoteURL: nil) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Theme.baseElevated
+                    }
+                }
+            }
+            .frame(height: 130)
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            // Outside the clip, so the badge sits in the corner of the frame the
+            // user sees. Inside, it anchored to the corner of the oversized
+            // aspect-fill image instead — which is off screen, so it came out
+            // half-clipped in the corner of the well.
+            .overlay(alignment: .bottomTrailing) {
+                if !coverFileName.isEmpty {
+                    Label("Change", systemImage: "camera.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(.black.opacity(0.55)))
+                        .padding(10)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+    }
+
     private func post() {
         guard let me else { return }
         if isPublic && me.isPrivate {
@@ -1090,6 +1189,9 @@ struct NewActivitySheet: View {
         let beacon = Beacon(spot: selectedSpot, host: me, note: note,
                             startsAt: startsAt, capacity: capacity)
         beacon.isPublic = isPublic
+        // Local file name only — `BeaconSync.publish` uploads it and fills in
+        // the URL, the same order `Clip` media goes up in.
+        beacon.coverImageFileName = coverFileName
         beacon.hostUID = me.remoteUID
         beacon.hostName = me.name
         beacon.hostEmoji = me.emoji

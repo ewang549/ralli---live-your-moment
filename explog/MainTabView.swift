@@ -189,6 +189,10 @@ struct MainTabView: View {
                 await postSyntheticLog(caption: caption)
             }
 
+            if ProcessInfo.processInfo.environment["EXPLOG_DEDUP_CHECK"] == "1" {
+                await runDedupCheck()
+            }
+
             // CLI screenshot hooks: SIMCTL_CHILD_EXPLOG_AUTO_OPEN=profile|places|beacons|capture
             switch ProcessInfo.processInfo.environment["EXPLOG_AUTO_OPEN"] {
             case "profile": router.tab = .profile
@@ -367,6 +371,58 @@ struct MainTabView: View {
 
         await logSync.publish(clip, context: modelContext, recipientUids: recipients)
     }
+
+    /// CLI verification hook: SIMCTL_CHILD_EXPLOG_DEDUP_CHECK=1
+    ///
+    /// Reproduces the duplicate-post bug against the real server and reports
+    /// whether it still happens. The client's own guards make it impossible to
+    /// trigger through the UI now — which is the point, but it also means the
+    /// server-side idempotency can no longer be exercised from the UI at all.
+    ///
+    /// Clearing `remoteID` between the two publishes is exactly what a lost
+    /// success looked like: the post reached the server, the save that recorded
+    /// its id didn't, and the next `publishPending` sweep re-sent a clip the
+    /// server had already stored. It used to answer with a second log; with a
+    /// stable `clientRequestId` it must answer with the first one's id.
+    ///
+    /// A vibe clip, so this needs neither media nor a friend roster — the
+    /// question is about `publishLog`, not about what was published.
+    private func runDedupCheck() async {
+        guard !Self.didDedupCheck else { return }
+        Self.didDedupCheck = true
+
+        let friends = (try? modelContext.fetch(FetchDescriptor<Friend>())) ?? []
+        guard let me = friends.first(where: \.isMe) else {
+            NSLog("DEDUP CHECK: SKIPPED — not signed in")
+            return
+        }
+
+        let clip = Clip(author: me, chat: nil, capturedAt: .now, kind: .vibe,
+                        label: "dedup check", emoji: "🔁", hueA: 0.5, hueB: 0.65)
+        modelContext.insert(clip)
+        try? modelContext.save()
+
+        await logSync.publish(clip, context: modelContext)
+        let firstID = clip.remoteID
+        guard !firstID.isEmpty else {
+            NSLog("DEDUP CHECK: SKIPPED — first publish never returned an id")
+            return
+        }
+
+        clip.remoteID = ""
+        try? modelContext.save()
+        await logSync.publish(clip, context: modelContext)
+
+        let secondID = clip.remoteID
+        if secondID == firstID {
+            NSLog("DEDUP CHECK: PASSED — both publishes returned \(firstID)")
+        } else {
+            NSLog("DEDUP CHECK: FAILED — \(firstID) then \(secondID)")
+        }
+    }
+
+    @MainActor
+    private static var didDedupCheck = false
 #endif
 
     /// A floating glass pill rather than a docked bar: it hovers over whatever

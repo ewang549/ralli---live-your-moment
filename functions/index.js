@@ -1429,8 +1429,24 @@ exports.publishLog = onCall(async (request) => {
     author = me.exists ? me.data() : null;
   }
 
-  const ref = db.collection("logs").doc();
-  await ref.set({
+  // Idempotency. A capture carries a stable id generated once on the device, so
+  // every delivery of the same capture — a double-tapped Post button, a retry
+  // sweep re-sending a clip whose success never made it to disk — lands on the
+  // same document instead of creating a second log.
+  //
+  // The id is hashed together with the caller's uid rather than used raw: the
+  // document id is derived from client input, and scoping it to the author
+  // stops one account's request id from naming (or overwriting) another's log.
+  // Clients that predate the field fall back to an auto-id, which is exactly
+  // the old behaviour.
+  const clientRequestId = cleanText(data.clientRequestId, 128);
+  const ref = clientRequestId
+    ? db.collection("logs").doc(
+      createHash("sha256").update(`${uid}:${clientRequestId}`).digest("hex").slice(0, 32),
+    )
+    : db.collection("logs").doc();
+
+  const logDoc = {
     id: ref.id,
     authorUid: uid,
     kind,
@@ -1458,8 +1474,25 @@ exports.publishLog = onCall(async (request) => {
     authorHandle: author ? author.handleDisplay || author.handle || "" : null,
     authorAvatarEmoji: author ? author.avatarEmoji || "🙂" : null,
     authorAvatarURL: author ? author.avatarURL || "" : null,
+    clientRequestId: clientRequestId || null,
     createdAt: FieldValue.serverTimestamp(),
+  };
+
+  // The create is a transaction rather than a plain `set` so two calls racing
+  // with the same request id can't both decide the log is new: one wins, the
+  // other re-reads and sees the doc. Everything that must happen exactly once
+  // per log — the spot's clip count, the push fan-out — is gated on `created`.
+  const created = await db.runTransaction(async (txn) => {
+    const existing = await txn.get(ref);
+    if (existing.exists) return false;
+    txn.set(ref, logDoc);
+    return true;
   });
+
+  if (!created) {
+    logger.info("publishLog deduplicated", { uid, logId: ref.id });
+    return { id: ref.id, capturedAt: capturedMs, audience, spotId, deduplicated: true };
+  }
 
   if (spotId) {
     await db.doc(`spots/${spotId}`).update({
@@ -2170,6 +2203,7 @@ function beaconPayload(beacon) {
     spotHueA: typeof beacon.spotHueA === "number" ? beacon.spotHueA : 0,
     spotHueB: typeof beacon.spotHueB === "number" ? beacon.spotHueB : 0,
     note: beacon.note || "",
+    coverImageURL: beacon.coverImageURL || "",
     startsAt: beacon.startsAt && beacon.startsAt.toMillis
       ? beacon.startsAt.toMillis()
       : Date.now(),
@@ -2201,18 +2235,38 @@ async function requireProfile(uid) {
 }
 
 /**
- * Callable: createBeacon({ spotId, note, startsAt, capacity, isPublic })
- *   -> { beacon }
+ * Callable: createBeacon({ spotId, note, startsAt, capacity, isPublic,
+ *   coverStoragePath, coverImageURL }) -> { beacon }
  *
  * `spotId` is optional — a beacon needn't be pinned to a place — but when one is
  * given it has to be a real spot, so a card can't claim a venue that doesn't
  * exist.
+ *
+ * The cover photo is optional too, and is uploaded by the client before this
+ * runs (Storage rules confine it to `beacons/{uid}/`). Both halves are passed
+ * because the path is what can be checked and the URL is what gets stored —
+ * exactly how `publishLog` handles a log's media.
  */
 exports.createBeacon = onCall(async (request) => {
   const uid = requireAuth(request);
   const data = request.data || {};
 
   const note = cleanText(data.note, 280);
+
+  // A host may only point a beacon at their own upload. Without the path check
+  // the URL is just a string the client chose, and any image on the bucket
+  // could be passed off as this plan's cover.
+  const coverStoragePath = cleanText(data.coverStoragePath, 512);
+  const coverImageURL = cleanText(data.coverImageURL, 2048);
+  if (coverStoragePath || coverImageURL) {
+    if (!coverStoragePath.startsWith(`beacons/${uid}/`)) {
+      throw new HttpsError("permission-denied", "That cover photo isn't yours.");
+    }
+    if (!coverImageURL.startsWith("https://")) {
+      throw new HttpsError("invalid-argument", "That cover photo URL isn't usable.");
+    }
+  }
+
   const capacity = Math.min(
     Math.max(Math.round(Number(data.capacity) || BEACON_MIN_CAPACITY), BEACON_MIN_CAPACITY),
     BEACON_MAX_CAPACITY
@@ -2270,6 +2324,8 @@ exports.createBeacon = onCall(async (request) => {
     spotHueA: spot && typeof spot.hueA === "number" ? spot.hueA : 0,
     spotHueB: spot && typeof spot.hueB === "number" ? spot.hueB : 0,
     note,
+    coverStoragePath: coverStoragePath || null,
+    coverImageURL: coverImageURL || "",
     startsAt: new Date(startsMs),
     capacity,
     isPublic,
@@ -2497,6 +2553,46 @@ exports.deleteBeacon = onCall(async (request) => {
   await ref.delete();
   return { ok: true };
 });
+
+/**
+ * Scheduled: deletes beacons long past their window.
+ *
+ * `listFriendBeacons` / `listPublicBeacons` already hide anything older than
+ * `BEACON_LIFETIME_MS`, so this changes nothing a client can see — the docs were
+ * simply never removed, and accumulated for the lifetime of the project. The
+ * clients prune their own caches on the same rule (`Beacon.isExpired`); this is
+ * the server half.
+ *
+ * The cutoff is deliberately a day past the point a beacon stops being listed
+ * rather than the moment itself: nothing depends on prompt deletion, and the
+ * margin means a device that was offline over the boundary still gets one sync
+ * that mentions the beacon, so its own prune has something to agree with.
+ */
+exports.pruneExpiredBeacons = onSchedule(
+  { schedule: "30 4 * * *", timeZone: "America/Los_Angeles" },
+  async () => {
+    const cutoff = new Date(Date.now() - BEACON_LIFETIME_MS - 24 * 3600 * 1000);
+
+    // Capped per run so a first sweep over a long backlog can't run away with
+    // the function's time budget; the next run picks up where this left off.
+    const stale = await db.collection("beacons")
+      .where("startsAt", "<", cutoff)
+      .orderBy("startsAt")
+      .limit(400)
+      .get();
+
+    if (stale.empty) {
+      logger.info("pruneExpiredBeacons: nothing to delete");
+      return;
+    }
+
+    const batch = db.batch();
+    stale.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+
+    logger.info("pruneExpiredBeacons deleted expired beacons", { count: stale.size });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Push notifications (Phase 3)

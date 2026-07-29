@@ -470,6 +470,19 @@ final class Clip {
     var authorUID: String = ""
     /// True for a clip pulled down from a friend rather than captured here.
     var isRemote: Bool = false
+    /// A stable id for the capture this clip represents, sent to `publishLog`
+    /// so the server can recognise a repeat delivery of the same capture.
+    ///
+    /// Generated once and never regenerated: that's what makes it work as an
+    /// idempotency key. Without it, a retry of a send whose success never
+    /// reached disk looks like a brand-new post to the server, and a
+    /// double-tapped Post button looks like two.
+    ///
+    /// Defaults to the clip's own `id` for clips created before this existed —
+    /// `LogSync.publish` falls back to that when this is empty, so the store
+    /// migrates without a backfill.
+    var clientRequestID: String = ""
+
     /// The spot this clip was meant to be posted publicly to, when it was.
     ///
     /// Kept on the clip rather than only passed to `publish` so a retry knows
@@ -523,7 +536,13 @@ final class Clip {
     init(author: Friend?, chat: Chat?, capturedAt: Date, kind: ClipKind,
          assetFileName: String? = nil, label: String, emoji: String,
          hueA: Double, hueB: Double, reactions: [Reaction] = []) {
-        self.id = UUID()
+        let id = UUID()
+        self.id = id
+        // One clip, one request id, from the moment it exists. Callers that
+        // need several local clips to publish as the *same* log — the place
+        // composer, where a double tap makes two — overwrite this with an id
+        // scoped to the capture instead.
+        self.clientRequestID = id.uuidString
         self.author = author
         self.chat = chat
         self.capturedAt = capturedAt
@@ -876,6 +895,33 @@ final class Beacon {
     var hostEmoji: String = ""
     var hostAvatarURL: String = ""
 
+    /// The host's own photo for this plan, shown as the card's hero in place of
+    /// the place's generated vibe art.
+    ///
+    /// Two fields for the same picture, for the same reason a `Clip` has both an
+    /// `assetFileName` and a `remoteURLString`: the file is on this device the
+    /// moment it's picked, and the upload lands later. The host sees their photo
+    /// immediately; everyone else gets it from the URL.
+    var coverImageFileName: String = ""
+    var coverImageURL: String = ""
+    /// Where the upload landed in Storage. Sent alongside the URL so
+    /// `createBeacon` can check the photo is actually the host's own.
+    var coverStoragePath: String = ""
+
+    /// The picked file on disk, if this beacon was created here.
+    var coverImageLocalURL: URL? {
+        guard !coverImageFileName.isEmpty else { return nil }
+        return URL.documentsDirectory.appending(path: coverImageFileName)
+    }
+
+    var coverImageRemoteURL: URL? {
+        coverImageURL.isEmpty ? nil : URL(string: coverImageURL)
+    }
+
+    /// Whether there's a cover to draw at all — the hero falls back to the
+    /// place's vibe art when there isn't.
+    var hasCoverImage: Bool { coverImageLocalURL != nil || coverImageRemoteURL != nil }
+
     /// Everyone who has RSVP'd, as account uids — the roster of record.
     ///
     /// `joined` can only hold attendees this device has a `Friend` row for, so
@@ -892,6 +938,20 @@ final class Beacon {
         self.capacity = capacity
         self.joined = joined
     }
+
+    /// How long a beacon stays live past the time it was called for.
+    ///
+    /// Mirrors `BEACON_LIFETIME_MS` in `functions/index.js`, which is what
+    /// `listFriendBeacons` / `listPublicBeacons` filter on. The client needs its
+    /// own copy because a beacon that's already been synced onto the device
+    /// otherwise stays on screen forever: falling out of the server's results
+    /// doesn't remove a row that's already local.
+    static let lifetime: TimeInterval = 6 * 3600
+
+    var expiresAt: Date { startsAt.addingTimeInterval(Beacon.lifetime) }
+
+    /// Past its window, so nobody is turning up any more.
+    var isExpired: Bool { expiresAt <= .now }
 
     /// How many people are in, counting attendees this device has no `Friend`
     /// row for. Local-only beacons (seed data) carry no uids and fall back to

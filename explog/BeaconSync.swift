@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import FirebaseAuth
+import FirebaseStorage
 import Observation
 import os
 
@@ -39,6 +40,27 @@ final class BeaconSync {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         guard beacon.remoteID.isEmpty else { return }
 
+        // The cover photo goes up first, because `createBeacon` stores its URL.
+        //
+        // Best-effort on purpose: a plan nobody can see is a worse outcome than
+        // a plan without its picture, so a failed upload doesn't abort the
+        // publish. The file stays in Documents and the host keeps seeing their
+        // own cover locally either way.
+        if beacon.coverImageURL.isEmpty, let local = beacon.coverImageLocalURL {
+            do {
+                let uploaded = try await Self.uploadCover(at: local, uid: uid)
+                guard Auth.auth().currentUser?.uid == uid else { return }
+                beacon.coverImageURL = uploaded.url
+                beacon.coverStoragePath = uploaded.path
+                try? context.save()
+            } catch {
+                beaconLog.error("""
+                    cover upload failed, publishing without it: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        }
+
         var payload: [String: Any] = [
             "note": beacon.note,
             "startsAt": beacon.startsAt.timeIntervalSince1970 * 1000,
@@ -47,6 +69,10 @@ final class BeaconSync {
         ]
         if let spotID = beacon.spot?.remoteID, !spotID.isEmpty {
             payload["spotId"] = spotID
+        }
+        if !beacon.coverImageURL.isEmpty, !beacon.coverStoragePath.isEmpty {
+            payload["coverImageURL"] = beacon.coverImageURL
+            payload["coverStoragePath"] = beacon.coverStoragePath
         }
 
         do {
@@ -68,6 +94,12 @@ final class BeaconSync {
             // leaving the card promising something it won't honour.
             beacon.capacity = response.beacon.capacity
             beacon.startsAt = Date(timeIntervalSince1970: response.beacon.startsAt / 1000)
+            // Only ever adopted, never cleared: the server echoes back "" for a
+            // beacon posted without a cover, and for one whose upload failed the
+            // local file is still the only copy there is.
+            if let cover = response.beacon.coverImageURL, !cover.isEmpty {
+                beacon.coverImageURL = cover
+            }
             try? context.save()
             beaconLog.info("published beacon \(response.beacon.id, privacy: .public)")
         } catch let error as CallableFunctions.CallableError {
@@ -79,6 +111,22 @@ final class BeaconSync {
             lastError = "Couldn't share that beacon."
             beaconLog.error("createBeacon failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Puts a picked cover photo in Storage under the host's own prefix, which
+    /// is what both the Storage rules and `createBeacon` require.
+    ///
+    /// Same shape as `FirestoreService.uploadAvatarPhoto` and `LogSync`'s media
+    /// step. Returns both halves because the callable wants both: the path is
+    /// what it can verify, the URL is what it stores.
+    private static func uploadCover(at localURL: URL, uid: String) async throws -> (path: String, url: String) {
+        let path = "beacons/\(uid)/\(UUID().uuidString).jpg"
+        let ref = Storage.storage().reference(withPath: path)
+        let metadata = StorageMetadata()
+        metadata.contentType = "image/jpeg"
+
+        _ = try await ref.putFileAsync(from: localURL, metadata: metadata)
+        return (path, try await ref.downloadURL().absoluteString)
     }
 
     /// Publishes every beacon the user hosts that hasn't reached the server —
@@ -99,6 +147,11 @@ final class BeaconSync {
 
     // MARK: Sync down
 
+    /// How many rows a sync-down asks for. Named because `prune` needs it: a
+    /// response that filled the page might have left live beacons behind it,
+    /// and deleting those would be pruning on incomplete information.
+    private static let pageLimit = 80
+
     /// Pulls friends-only beacons hosted by the caller's friends (and their own)
     /// and mirrors them into the local cache.
     func syncDown(context: ModelContext) async {
@@ -117,7 +170,7 @@ final class BeaconSync {
 
         do {
             let response = try await CallableFunctions.call(callable,
-                                                            data: ["limit": 80],
+                                                            data: ["limit": Self.pageLimit],
                                                             as: BeaconsResponse.self)
 
             // Same guard as FriendGraph.refresh: never touch the store on
@@ -125,6 +178,7 @@ final class BeaconSync {
             guard !Task.isCancelled, Auth.auth().currentUser?.uid == uid else { return }
 
             materialise(response.beacons, into: context)
+            prune(against: response.beacons, from: callable, into: context)
             lastError = nil
         } catch let error as CallableFunctions.CallableError {
             guard Auth.auth().currentUser?.uid == uid else { return }
@@ -276,6 +330,11 @@ final class BeaconSync {
             beacon.startsAt = Date(timeIntervalSince1970: remote.startsAt / 1000)
             beacon.capacity = remote.capacity
             beacon.isPublic = remote.isPublic
+            // As in `publish`: an absent cover doesn't wipe a local file that a
+            // host is still waiting to upload.
+            if let cover = remote.coverImageURL, !cover.isEmpty {
+                beacon.coverImageURL = cover
+            }
             beacon.joinedUIDs = remote.joinedUids
             if beacon.spot == nil { beacon.spot = spot }
             if beacon.host == nil { beacon.host = byUID[remote.hostUid] }
@@ -288,6 +347,75 @@ final class BeaconSync {
         }
 
         try? context.save()
+    }
+
+    /// Deletes local rows a sync-down says are gone.
+    ///
+    /// `materialise` only ever adds and updates, so before this nothing removed
+    /// a beacon from the device: one the host deleted, or one that aged past the
+    /// server's six-hour window, stayed in the store for good. The feed hides
+    /// expired ones now (`Beacon.isExpired`), but they were still accumulating
+    /// behind it, and a deleted beacon has no expiry to hide behind at all.
+    ///
+    /// Two rules, because a single response never describes the whole store:
+    ///
+    /// - **Expired rows go unconditionally.** No response can bring one back —
+    ///   the server filters them out — so keeping one is pure sediment.
+    /// - **Rows missing from the response go only when the response is
+    ///   authoritative about them.** Each callable covers one audience, so a
+    ///   public sync must not delete friends-only beacons and vice versa; and a
+    ///   response that filled its page may simply have run out of room, so
+    ///   nothing is pruned on that basis unless it came back short.
+    ///
+    /// Beacons that never reached the server (`remoteID` empty — seed rows, and
+    /// ones created offline that `publishPending` still owes an upload) are only
+    /// ever pruned by the expiry rule: no server response knows about them.
+    private func prune(against remotes: [RemoteBeacon], from callable: String, into context: ModelContext) {
+        let all = (try? context.fetch(FetchDescriptor<Beacon>())) ?? []
+        guard !all.isEmpty else { return }
+
+        let returned = Set(remotes.map(\.id))
+        let responseWasComplete = remotes.count < Self.pageLimit
+        // `listPublicBeacons` speaks for public beacons, `listFriendBeacons` for
+        // friends-only ones. A friend's public beacon shows up in both feeds but
+        // is only ever *removed* on the authority of the public one.
+        let scopeIsPublic = callable == "listPublicBeacons"
+
+        var removed = 0
+        for beacon in all {
+            guard Self.shouldPrune(beacon,
+                                   returned: returned,
+                                   responseWasComplete: responseWasComplete,
+                                   scopeIsPublic: scopeIsPublic) else { continue }
+            context.delete(beacon)
+            removed += 1
+        }
+
+        guard removed > 0 else { return }
+        try? context.save()
+        beaconLog.info("pruned \(removed, privacy: .public) stale beacon(s)")
+    }
+
+    /// The decision behind `prune`, split out so the scoping rules can be tested
+    /// without a signed-in session and a network round trip. Getting these wrong
+    /// deletes beacons that are still live, which is silent and unrecoverable —
+    /// so they're worth pinning down.
+    ///
+    /// - Parameters:
+    ///   - returned: `remoteID`s the response actually carried.
+    ///   - responseWasComplete: false when the page filled, i.e. live beacons may
+    ///     exist beyond it that this response says nothing about.
+    ///   - scopeIsPublic: which audience the callable speaks for.
+    static func shouldPrune(_ beacon: Beacon,
+                            returned: Set<String>,
+                            responseWasComplete: Bool,
+                            scopeIsPublic: Bool) -> Bool {
+        if beacon.isExpired { return true }
+
+        return responseWasComplete
+            && !beacon.remoteID.isEmpty
+            && beacon.isPublic == scopeIsPublic
+            && !returned.contains(beacon.remoteID)
     }
 
     // MARK: Wire types
@@ -327,5 +455,10 @@ final class BeaconSync {
         let capacity: Int
         let isPublic: Bool
         let joinedUids: [String]
+        /// Optional rather than defaulted: beacons created before covers existed
+        /// carry no such field, and a non-optional would fail the whole decode —
+        /// dropping the entire feed over a missing photo. Same convention as
+        /// `LogSync`'s optional counters.
+        let coverImageURL: String?
     }
 }
