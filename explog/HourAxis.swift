@@ -82,6 +82,14 @@ extension Chat {
 struct EdgeStepZones: View {
     let onBack: () -> Void
     let onForward: () -> Void
+    /// What a *swipe* does, when it should mean something bigger than a tap.
+    ///
+    /// Tap and swipe were one pair of closures until the two gestures had to
+    /// diverge: a tap walks the axis one hour at a time, a swipe jumps a whole
+    /// day. Optional, and falling back to the tap closures when unset, so a call
+    /// site that doesn't care keeps both gestures meaning the same thing.
+    var onSwipeBack: (() -> Void)?
+    var onSwipeForward: (() -> Void)?
     /// Ignores forward taps and swipes when the axis has nothing ahead — the
     /// live hour, or today on the recap.
     var canStepForward: Bool = true
@@ -117,7 +125,8 @@ struct EdgeStepZones: View {
         }
     }
 
-    /// Horizontal swipe → the same step the edge taps make.
+    /// Horizontal swipe → `onSwipe*` where the call site distinguishes it from a
+    /// tap, and the plain step otherwise.
     ///
     /// `.simultaneousGesture` rather than `.gesture`, and this matters: these
     /// panes live inside vertically-paging scroll views, and an exclusive drag
@@ -138,10 +147,10 @@ struct EdgeStepZones: View {
                               abs(dx) > abs(value.translation.height) else { return }
                         if dx < 0 {
                             guard canStepForward else { return }
-                            onForward()
+                            (onSwipeForward ?? onForward)()
                         } else {
                             guard canStepBack else { return }
-                            onBack()
+                            (onSwipeBack ?? onBack)()
                         }
                     }
             )

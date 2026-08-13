@@ -1,5 +1,8 @@
 import SwiftUI
 import UIKit
+import os
+
+private let reviewLog = Logger(subsystem: "com.ej.explog", category: "overlay")
 
 /// The moment right after capture: the shot full-bleed, a creative rail of tools
 /// (text, stickers, draw) down one edge, and a prominent coral **Next** that
@@ -105,6 +108,9 @@ struct PostCaptureReview: View {
         GeometryReader { geo in
             ZStack {
                 Theme.base.ignoresSafeArea()
+                    .onAppear {
+                        reviewLog.notice("PostCaptureReview body: GeometryReader geo.size=\(String(describing: geo.size)) vs UIScreen.main.bounds.size=\(String(describing: UIScreen.main.bounds.size))")
+                    }
 
                 // The shot at its true aspect, graded with the chosen look.
                 //
@@ -146,7 +152,22 @@ struct PostCaptureReview: View {
                     captionField
                 }
 
+                // `.ignoresSafeArea()` here is load-bearing, not decoration —
+                // every sibling in this ZStack that a sticker's position has to
+                // agree with (`ClipView` above, `strokeCanvas` below) already
+                // ignores the safe area, but this one didn't, so it alone was
+                // laid out in the *safe-area-inset* frame: narrower at the top
+                // by the status bar / Dynamic Island height. A drag ended at a
+                // screen point measured from that inset origin, but
+                // `renderOverlayLayer()` bakes `item.position` into an offscreen
+                // canvas sized to the full `UIScreen.main.bounds` with no safe
+                // area of its own to subtract — so every sticker's `position.y`
+                // landed that same inset amount too high once burned in. That's
+                // exactly the "emoji jumps up after sending" bug: the two
+                // coordinate spaces disagreed by the status bar's height, silently,
+                // because nothing else on this screen had that particular gap.
                 overlayLayer(in: geo.size)
+                    .ignoresSafeArea()
 
                 // Finger-draw capture sits above overlays only while drawing.
                 if tool == .draw {
@@ -497,6 +518,7 @@ struct PostCaptureReview: View {
     @MainActor
     private func renderOverlayLayer() -> OverlayBurnIn.OverlayRender? {
         let screen = UIScreen.main.bounds.size
+        reviewLog.notice("renderOverlayLayer: UIScreen.main.bounds.size=\(String(describing: screen)) UIScreen.main.scale=\(UIScreen.main.scale) stickers=\(stickers.map { "(\($0.position.x),\($0.position.y)) scale=\($0.scale)" }.joined(separator: "; "))")
         let renderer = ImageRenderer(content:
             ZStack {
                 Color.clear
@@ -644,7 +666,14 @@ struct PostCaptureReview: View {
     private var staticOverlays: some View {
         ZStack {
             ForEach(stickers) { item in
+                // Same `.padding(6)` `MovableOverlay` applies before its own
+                // `.scaleEffect`, so a scaled-up sticker burns in at the exact
+                // size it was shown at live — padding added *after* scaling
+                // wouldn't grow with it, and this omitted it entirely, so a
+                // sticker anyone had pinched larger during editing came out
+                // smaller in the sent file than what they'd actually placed.
                 Text(item.emoji).font(.system(size: 72))
+                    .padding(6)
                     .scaleEffect(item.scale).rotationEffect(item.rotation)
                     .position(item.position)
             }

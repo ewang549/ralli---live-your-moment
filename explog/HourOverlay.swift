@@ -47,6 +47,57 @@ extension Font {
     static let logCaptionCompact = Font.system(size: 15, weight: .semibold, design: .rounded)
 }
 
+// MARK: - The stamp block
+
+/// The hour banner with the log's caption directly beneath it.
+///
+/// These two are one block, not two overlays — `PostCaptureReview` composes them
+/// this way before a log is ever sent, and every surface that plays the log back
+/// has to keep them together or the caption a user watched sit under the time on
+/// the review screen jumps somewhere else the moment it's sent.
+///
+/// Defined here rather than inside any one feed because it is genuinely shared:
+/// the stacked panes (Pulse, the 1-on-1 and group and all-friends feeds) and the
+/// daily recap all draw it. The recap used to draw nothing at all, and
+/// `MontageView` drew its own plain-`Text` version — a third shape for the same
+/// two strings. One definition is what stops that happening again.
+struct ClipStamp: View {
+    let date: Date
+    /// `Clip.label`. Empty hides the caption line and leaves the hour alone.
+    let caption: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HourOverlay(date: date)
+            if !caption.isEmpty {
+                Text(caption)
+                    .font(.logCaptionCompact)
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.65), radius: 5, y: 1)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 24)
+            }
+        }
+        // Pure readout: left hit-testable it sits above the scrub zones and
+        // swallows taps landing mid-frame.
+        .allowsHitTesting(false)
+    }
+}
+
+/// The legibility wash the stamp is read against.
+///
+/// Captions sit over live video, which is bright and moving and cannot be relied
+/// on to stay dark behind white type. Paired with `ClipStamp` wherever it's drawn
+/// over media.
+struct ClipStampScrim: View {
+    var body: some View {
+        LinearGradient(colors: [.black.opacity(0.5), .clear, .black.opacity(0.55)],
+                       startPoint: .top, endPoint: .bottom)
+            .allowsHitTesting(false)
+    }
+}
+
 /// `HourOverlay` over the current hour, kept current while the screen is up.
 ///
 /// Used where there is no captured clip to stamp yet — the live viewfinder —

@@ -76,14 +76,36 @@ enum InterfaceOrientationLock {
         // Update the reported mask FIRST so that when the system re-queries
         // supported orientations below it already sees the new policy.
         mask = newMask
+        // Logged on the way in, not only on failure. The error handler below is
+        // silent in the success case, which makes "no output at all" mean three
+        // different things at once: the policy change never happened, it
+        // happened but found no scene to ask, or it was asked and accepted.
+        // Under a hardware rotation lock those are the exact possibilities that
+        // need telling apart, and only this line separates them.
+        orientationLog.notice(
+            "apply(mask: \(newMask.rawValue, privacy: .public)) device=\(UIDevice.current.orientation.rawValue, privacy: .public)"
+        )
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }) else { return }
+            .first(where: { $0.activationState == .foregroundActive }) else {
+            orientationLog.error("no foreground-active window scene; geometry update not requested")
+            return
+        }
         // The handler only runs on failure. Swallowing it was how the declined
         // rotation under a hardware rotation lock stayed invisible for so long.
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: newMask)) { error in
             orientationLog.error(
                 "requestGeometryUpdate(mask: \(newMask.rawValue, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        // Where the interface actually ended up, once it has had time to turn.
+        // An accepted request that nonetheless leaves the interface where it was
+        // is indistinguishable from a working rotation in the log otherwise, and
+        // that difference is the whole question under a rotation lock.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            orientationLog.notice(
+                "settled interface=\(scene.interfaceOrientation.rawValue, privacy: .public) for mask=\(newMask.rawValue, privacy: .public)"
             )
         }
         // Nudge the system to re-read `supportedInterfaceOrientationsFor`, so it

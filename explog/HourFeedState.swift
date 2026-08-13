@@ -25,6 +25,22 @@ final class HourFeedState {
         selectedHour = min(candidate, Self.floorToHour(.now, calendar: calendar))
     }
 
+    /// Jumps a whole day forward/back while keeping the hour-of-day exactly
+    /// where it was — swipe forward from 3 PM lands on 3 PM the next day, not
+    /// midnight.
+    ///
+    /// The swipe gesture's move, distinct from the other two: `jump(toDay:)`
+    /// goes to an arbitrary specific day the calendar picker names rather than
+    /// stepping relative to the current one, and `step(_:)` walks the axis an
+    /// hour at a time. This one is the shortcut — a whole day in one gesture,
+    /// landing at the same time of day you were already reading.
+    func stepDay(_ delta: Int) {
+        guard let target = calendar.date(byAdding: .day, value: delta, to: selectedHour) else { return }
+        // Same clamp as `jump(toDay:)`: swiping forward from an hour later than
+        // right now would otherwise land on an hour that hasn't happened.
+        selectedHour = min(target, Self.floorToHour(.now, calendar: calendar))
+    }
+
     func jump(toDay day: Date) {
         // Preserve the hour-of-day while switching days (calendar picker entry point).
         let hour = calendar.component(.hour, from: selectedHour)
@@ -50,11 +66,7 @@ final class HourFeedState {
     }
 
     /// "today" / "yesterday" / "Mon, Jul 20" — the badge subtitle.
-    var dayLabel: String {
-        if calendar.isDateInToday(selectedHour) { return "today" }
-        if calendar.isDateInYesterday(selectedHour) { return "yesterday" }
-        return selectedHour.formatted(.dateTime.weekday(.abbreviated).month().day())
-    }
+    var dayLabel: String { selectedHour.dayLabel }
 
     /// Whether `date` falls inside the hour the feed is currently showing.
     func containsHour(of date: Date) -> Bool {

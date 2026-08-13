@@ -196,6 +196,20 @@ extension Date {
         return zeroed.formatted(date: .omitted, time: .shortened)
     }
 
+    /// "today" / "yesterday" / "Mon, Jul 20" — which day a log belongs to.
+    ///
+    /// Shared by every screen that shows one, because an edge tap now walks the
+    /// clock straight through midnight: the date is the only thing on screen
+    /// that distinguishes 11 PM from the 12 AM one tap later, so all three feeds
+    /// have to word it identically or the same day reads as two different days
+    /// depending on where you look.
+    var dayLabel: String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(self) { return "today" }
+        if calendar.isDateInYesterday(self) { return "yesterday" }
+        return formatted(.dateTime.weekday(.abbreviated).month().day())
+    }
+
     var relativeHour: String {
         let interval = Date.now.timeIntervalSince(self)
         if interval < 3600 { return "\(max(1, Int(interval / 60)))m ago" }

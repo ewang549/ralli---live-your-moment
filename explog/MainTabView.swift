@@ -1,5 +1,8 @@
 import SwiftUI
 import SwiftData
+import os
+
+private let orientationLog = Logger(subsystem: "com.ej.explog", category: "orientation")
 
 /// Shared navigation state: lets any view (e.g. the privacy guard alert)
 /// programmatically switch tabs or open capture.
@@ -128,10 +131,15 @@ struct MainTabView: View {
         // that tab's duration cap. Turning back to portrait closes the camera
         // and restores the remembered tab — a clean, glitch-free round trip.
         .onChange(of: orientation.isLandscape) { _, landscape in
+            orientationLog.notice("MainTabView onChange(isLandscape) fired: landscape = \(landscape), router.showCapture (before) = \(router.showCapture)")
             if landscape {
-                guard !router.showCapture else { return }
+                guard !router.showCapture else {
+                    orientationLog.notice("bailing: router.showCapture already true")
+                    return
+                }
                 router.previousTab = router.tab               // save active tab
                 router.openCapture(router.contextForCurrentTab)
+                orientationLog.notice("called router.openCapture; router.showCapture (after) = \(router.showCapture)")
             } else {
                 // Back to portrait — the state machine decides what happens:
                 //   State 1 (isPreviewActive == false): still on the live

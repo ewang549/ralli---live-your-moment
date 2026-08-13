@@ -94,7 +94,8 @@ struct LogInsightsView: View {
                                 row("eye.fill", "Views", "\(clip.viewCount)")
                             }
                             if let publicSpot, !publicSpot.category.isEmpty {
-                                row("mappin.and.ellipse", "Place category", publicSpot.category)
+                                row("mappin.and.ellipse", "Place category",
+                                    POICategoryLabel.display(publicSpot.category))
                             }
                         }
 

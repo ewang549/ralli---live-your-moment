@@ -444,7 +444,7 @@ struct BeaconFeedCard: View {
                     .shadow(color: .black.opacity(0.4), radius: 5, y: 1)
                     .lineLimit(1)
                 if let spot = beacon.spot {
-                    Text("\(spot.category) · \(spot.distanceMiles, specifier: "%.1f") mi away")
+                    Text("\(POICategoryLabel.display(spot.category)) · \(spot.distanceMiles, specifier: "%.1f") mi away")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.9))
                 } else {

@@ -80,14 +80,17 @@ enum OverlayBurnIn {
     static func fittedRect(mediaSize: CGSize, in container: CGSize) -> CGRect {
         guard mediaSize.width > 0, mediaSize.height > 0,
               container.width > 0, container.height > 0 else {
+            burnLog.notice("fittedRect: degenerate input, mediaSize=\(String(describing: mediaSize)) container=\(String(describing: container)) -> returning full container")
             return CGRect(origin: .zero, size: container)
         }
         let scale = min(container.width / mediaSize.width, container.height / mediaSize.height)
         let size = CGSize(width: mediaSize.width * scale, height: mediaSize.height * scale)
-        return CGRect(x: (container.width - size.width) / 2,
+        let rect = CGRect(x: (container.width - size.width) / 2,
                       y: (container.height - size.height) / 2,
                       width: size.width,
                       height: size.height)
+        burnLog.notice("fittedRect: mediaSize=\(String(describing: mediaSize)) container=\(String(describing: container)) -> rect=\(String(describing: rect))")
+        return rect
     }
 
     /// The part of the screen-sized overlay that sits over the media itself.
@@ -105,9 +108,13 @@ enum OverlayBurnIn {
                                y: rect.origin.y * scale,
                                width: rect.width * scale,
                                height: rect.height * scale).integral
+        burnLog.notice("cropToMedia: overlay.screenSize=\(String(describing: overlay.screenSize)) overlay.image.size=\(String(describing: overlay.image.size)) overlay.image.scale=\(scale) cgImage.pixels=\(cgImage.width)x\(cgImage.height) pixelRect=\(String(describing: pixelRect))")
 
         let bounds = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
-        guard let cropped = cgImage.cropping(to: pixelRect.intersection(bounds)) else { return nil }
+        guard let cropped = cgImage.cropping(to: pixelRect.intersection(bounds)) else {
+            burnLog.error("cropToMedia: cropping failed, pixelRect \(String(describing: pixelRect)) did not intersect bounds \(String(describing: bounds))")
+            return nil
+        }
         return UIImage(cgImage: cropped, scale: scale, orientation: .up)
     }
 
@@ -218,15 +225,22 @@ enum OverlayBurnIn {
                                                                     assetFileName: source.lastPathComponent)),
               let cropped = cropToMedia(overlay, mediaSize: displaySize),
               let overlayCG = cropped.cgImage else { return nil }
+        burnLog.notice("burnVideo: displaySize=\(String(describing: displaySize)) cropped.size=\(String(describing: cropped.size)) cropped.scale=\(cropped.scale)")
 
         let overlayImage = CIImage(cgImage: overlayCG)
+        var loggedFirstFrame = false
         let videoComposition: AVMutableVideoComposition
         do {
             videoComposition = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
                 let frame = request.sourceImage.extent
+                if !loggedFirstFrame {
+                    loggedFirstFrame = true
+                    burnLog.notice("burnVideo: first composition request, sourceImage.extent=\(String(describing: frame)) (compare width/height ratio against displaySize \(String(describing: displaySize)) above -- a swapped aspect here means the frame is still in pre-transform orientation)")
+                }
                 let overlaid = fit(overlayImage, into: frame).composited(over: request.sourceImage)
                 request.finish(with: overlaid, context: nil)
             }
+            burnLog.notice("burnVideo: videoComposition.renderSize=\(String(describing: videoComposition.renderSize))")
         } catch {
             burnLog.error("video composition build failed: \(error.localizedDescription, privacy: .public)")
             return nil

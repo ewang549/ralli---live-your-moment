@@ -66,6 +66,13 @@ struct StackedClipPane: View {
     /// their taps to them. The rail sits in the trailing quarter on these
     /// feeds, so relying on the inert middle alone wouldn't be enough here.
     var onStepHour: ((Int) -> Void)?
+    /// Jumps a whole day by `-1` or `+1`, from a horizontal swipe.
+    ///
+    /// The bigger sibling of `onStepHour`: a tap crawls the axis hour by hour
+    /// and rolls over midnight on its own, a swipe skips the walk and lands on
+    /// the start of the neighbouring day. Nil falls back to the hour step, so a
+    /// pane that hasn't opted in behaves exactly as it did.
+    var onSwipeDay: ((Int) -> Void)?
     /// False at the current hour, where there is nothing ahead to step into.
     var canStepHourForward: Bool = true
 
@@ -116,8 +123,7 @@ struct StackedClipPane: View {
             }
 
             // Legibility scrim — captions sit over live video.
-            LinearGradient(colors: [.black.opacity(0.5), .clear, .black.opacity(0.55)],
-                           startPoint: .top, endPoint: .bottom)
+            ClipStampScrim()
 
             // The hour this log was filmed, burned across the middle of the
             // frame — the same banner the camera and the review screen show,
@@ -130,15 +136,7 @@ struct StackedClipPane: View {
             // the review screen jumped to the far corner the moment the log was
             // sent and played back.
             if let clip {
-                VStack(spacing: 6) {
-                    HourOverlay(date: clip.capturedAt)
-                    if !clip.label.isEmpty {
-                        captionOverlay(clip.label)
-                    }
-                }
-                // Pure readout: left hit-testable it sits above the scrub zones
-                // and swallows taps landing mid-frame.
-                .allowsHitTesting(false)
+                ClipStamp(date: clip.capturedAt, caption: clip.label)
             }
 
             // Hour scrubbing sits here in the stack: over the media and the
@@ -146,6 +144,8 @@ struct StackedClipPane: View {
             if let onStepHour {
                 EdgeStepZones(onBack: { onStepHour(-1) },
                               onForward: { onStepHour(1) },
+                              onSwipeBack: onSwipeDay.map { step in { step(-1) } },
+                              onSwipeForward: onSwipeDay.map { step in { step(1) } },
                               canStepForward: canStepHourForward)
             }
 
@@ -232,22 +232,6 @@ struct StackedClipPane: View {
         }
     }
 
-    /// The friend's caption, drawn directly under the hour stamp on their own
-    /// clip — not in a shared bar — so in a stack you can tell who said what.
-    ///
-    /// `logCaptionCompact` and centred, because it is the second line of the
-    /// stamp block rather than an independent overlay. This is the same pairing
-    /// the review screen composes before the log is ever sent.
-    private func captionOverlay(_ caption: String) -> some View {
-        Text(caption)
-            .font(.logCaptionCompact)
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.65), radius: 5, y: 1)
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .padding(.horizontal, 24)
-    }
-
     private var noClipPlaceholder: some View {
         ZStack {
             LinearGradient(colors: [Theme.baseElevated, Theme.base],
@@ -312,6 +296,15 @@ struct FriendPairFeedView: View {
     private func stepHour(_ delta: Int) {
         let before = hourState.selectedHour
         withAnimation(.easeInOut(duration: 0.2)) { hourState.step(delta) }
+        guard hourState.selectedHour != before else { return } // clamped at "now"
+        clock.resync()
+    }
+
+    /// The swipe's move: a whole day in one gesture, keeping the hour you were
+    /// reading so the same time of day is what you land on.
+    private func stepDay(_ delta: Int) {
+        let before = hourState.selectedHour
+        withAnimation(.easeInOut(duration: 0.2)) { hourState.stepDay(delta) }
         guard hourState.selectedHour != before else { return } // clamped at "now"
         clock.resync()
     }
@@ -417,6 +410,7 @@ struct FriendPairFeedView: View {
                     avatarSource: friend,
                     viewingHour: viewingHour,
                     onStepHour: stepHour,
+                    onSwipeDay: stepDay,
                     canStepHourForward: !hourState.isAtCurrentHour,
                     contentMode: .fit,
                     isActive: isActive
@@ -461,6 +455,7 @@ struct FriendPairFeedView: View {
                     avatarSource: me,
                     viewingHour: viewingHour,
                     onStepHour: stepHour,
+                    onSwipeDay: stepDay,
                     canStepHourForward: !hourState.isAtCurrentHour,
                     contentMode: .fit,
                     isActive: isActive
@@ -525,6 +520,16 @@ struct FriendPairFeedView: View {
                 Text(viewingHour.hourOnlyClockTime)
                     .font(.system(size: 14, weight: .heavy, design: .rounded).monospacedDigit())
                     .foregroundStyle(Theme.textPrimary)
+                    .contentTransition(.numericText())
+                // The hour alone can't tell you which day you're on, and this is
+                // the screen where tapping through midnight happens most: "11 PM"
+                // → "12 AM" looks like nothing happened without the date beside it.
+                Text("·")
+                    .font(.system(size: 14, weight: .heavy, design: .rounded))
+                    .foregroundStyle(Theme.textTertiary)
+                Text(hourState.dayLabel)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(Theme.textSecondary)
                     .contentTransition(.numericText())
             }
             .padding(.horizontal, 14)
@@ -913,8 +918,6 @@ struct AllFriendsFeedView: View {
 
     private var me: Friend? { friends.first { $0.isMe } }
 
-    /// Roughly a quarter of the screen per row, so four sit in view at once.
-    private static let rowsPerScreen: CGFloat = 4
     private static let rowSpacing: CGFloat = 10
 
     /// The whole roster, in a stable order.
@@ -940,12 +943,27 @@ struct AllFriendsFeedView: View {
         clock.resync()
     }
 
+    /// The swipe's move, as on the paired feed: a whole day at once, carrying
+    /// the current hour across rather than restarting at midnight.
+    private func stepDay(_ delta: Int) {
+        let before = hourState.selectedHour
+        withAnimation(.easeInOut(duration: 0.2)) { hourState.stepDay(delta) }
+        guard hourState.selectedHour != before else { return } // clamped at "now"
+        clock.resync()
+    }
+
     var body: some View {
         GeometryReader { proxy in
-            let rowHeight = (proxy.size.height / Self.rowsPerScreen).safeDimension
             // The list's own horizontal padding, taken off here so a row knows
             // the width it actually gets to size its card against.
             let rowWidth = (proxy.size.width - 24).safeDimension
+            // The row *is* the capture's shape rather than a fraction of the
+            // screen's height. Both were uniform, but a screen fraction has no
+            // relationship to what `.fit` actually draws, so every row carried a
+            // black band above and below the video. At the landscape ratio the
+            // clip fills the box exactly and there's nothing left for
+            // `StackedClipPane`'s backdrop to show through.
+            let rowHeight = (rowWidth / Clip.defaultAspectRatio).safeDimension
 
             // A plain scroll view: no paging behavior and no scroll position
             // binding, so it glides continuously. The rows keep
@@ -998,16 +1016,16 @@ struct AllFriendsFeedView: View {
     @ViewBuilder
     private func row(for friend: Friend, width: CGFloat, height: CGFloat) -> some View {
         let clip = friend.clip(forHourContaining: viewingHour)
-        // Every row is the same `width × height` box, populated or not.
+        // Every row is the same `width × height` box, populated or not — and
+        // that box is the landscape capture ratio (see `body`), so uniform and
+        // borderless are not in tension here the way they first looked.
         //
-        // This is a deliberate trade against the earlier no-letterbox pass,
-        // which sized each row to its own clip's aspect ratio. That does remove
-        // the bars, but friends' clips aren't all the same shape, so the list
-        // became a ragged column of differently-sized cards — much louder than
-        // a thin bar. A uniform box wins here: this screen is a scan down a
-        // list of people, and rows that stay put read as one list. Any clip
-        // whose ratio doesn't match the box letterboxes inside it via the
-        // `.fit` content mode below.
+        // Sizing each row to its own clip instead does remove the bars, but
+        // friends' clips aren't all the same shape, so the list becomes a ragged
+        // column of differently-sized cards — much louder than a thin bar, on a
+        // screen that's a scan down a list of people. Rows that stay put read as
+        // one list. Anything that isn't the usual landscape shape letterboxes
+        // inside the box via the `.fit` content mode below.
 
         Group {
             if let clip {
@@ -1021,6 +1039,7 @@ struct AllFriendsFeedView: View {
                     avatarSource: friend,
                     viewingHour: viewingHour,
                     onStepHour: stepHour,
+                    onSwipeDay: stepDay,
                     canStepHourForward: !hourState.isAtCurrentHour,
                     // Captures are landscape; filling a short wide row would
                     // crop away most of the shot, so it letterboxes instead —
@@ -1069,6 +1088,8 @@ struct AllFriendsFeedView: View {
 
             EdgeStepZones(onBack: { stepHour(-1) },
                           onForward: { stepHour(1) },
+                          onSwipeBack: { stepDay(-1) },
+                          onSwipeForward: { stepDay(1) },
                           canStepForward: !hourState.isAtCurrentHour)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -1100,10 +1121,13 @@ struct AllFriendsFeedView: View {
                         Image(systemName: "clock.arrow.circlepath")
                             .font(.system(size: 9, weight: .bold))
                     }
+                    // The day is named even while live, so it's a constant rather
+                    // than something that only appears once you've already tapped
+                    // your way off today without noticing.
                     Text(hourState.isAtCurrentHour
-                         ? "this hour"
+                         ? "this hour · \(hourState.dayLabel)"
                          : "\(hourState.hourLabel) · \(hourState.dayLabel)")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .contentTransition(.numericText())
                 }
                 .foregroundStyle(Theme.textSecondary)

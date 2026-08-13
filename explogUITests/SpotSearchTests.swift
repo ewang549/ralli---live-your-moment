@@ -115,12 +115,93 @@ final class SpotSearchTests: XCTestCase {
         add(shot)
     }
 
+    /// "Where are you" answered without typing.
+    ///
+    /// The picker only ever had two ways in — a name you typed, or a spot Ralli
+    /// already knew — while the one `CLLocationManager` in the app fetched a fix
+    /// purely to bias search relevance and never surfaced it. This drives the
+    /// third way: tap, and a real named place comes back.
+    ///
+    /// Needs a location fix, so it grants the prompt and skips rather than fails
+    /// when nothing arrives — a simulator with no simulated location has nowhere
+    /// to be standing.
+    @MainActor
+    func testUsingCurrentLocationResolvesAPlaceWithoutTyping() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["EXPLOG_AUTO_OPEN"] = "newbeacon"
+
+        app.launch()
+
+        let picker = app.buttons["Search for a place"].firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 30))
+        // The sheet animates in, and a tap that lands mid-presentation is
+        // swallowed — leaving the beacon composer up and nothing to find.
+        XCTAssertTrue(picker.waitForHittable(), "The place picker never settled.")
+        picker.tap()
+
+        // Opening the picker asks for location (search biasing already did), and
+        // the alert belongs to Springboard rather than the app — an unanswered
+        // one leaves the status `.notDetermined` and no fix ever arrives.
+        grantLocationIfAsked()
+
+        let here = app.buttons.containing(
+            NSPredicate(format: "label CONTAINS[c] 'Use current location'")
+        ).firstMatch
+        XCTAssertTrue(here.waitForExistence(timeout: 15),
+                      "The picker must offer somewhere to go without typing.")
+        here.tap()
+        grantLocationIfAsked()
+
+        // The same map confirmation a typed result reaches — the whole point of
+        // routing this into `pending` rather than building a second flow.
+        let confirm = app.buttons["Use this place"].firstMatch
+        let arrived = confirm.waitForExistence(timeout: 30)
+
+        // Attached either way: when this skips, the screen is the only thing
+        // that says whether the fix never came or MapKit had nothing there.
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "spot-search-current-location"
+        shot.lifetime = .keepAlways
+        add(shot)
+
+        guard arrived else {
+            throw XCTSkip("No location fix or no MapKit response — needs a simulated location and network.")
+        }
+    }
+
+    /// Answers the system location prompt if it's up, and does nothing if it
+    /// isn't — the grant persists across launches, so it only appears once.
+    @MainActor
+    private func grantLocationIfAsked(timeout: TimeInterval = 5) {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for label in ["Allow While Using App", "Allow Once", "Allow"] {
+            let button = springboard.buttons[label]
+            if button.waitForExistence(timeout: timeout) {
+                button.tap()
+                return
+            }
+        }
+    }
+
     private func waitForDisappearance(of element: XCUIElement,
                                       timeout: TimeInterval = 15) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if !element.exists { return true }
             usleep(300_000)
+        }
+        return false
+    }
+}
+
+private extension XCUIElement {
+    /// Existing isn't the same as tappable: a sheet mid-presentation reports its
+    /// buttons as present while every tap on them goes nowhere.
+    func waitForHittable(timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isHittable { return true }
+            usleep(200_000)
         }
         return false
     }

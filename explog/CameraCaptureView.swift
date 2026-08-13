@@ -289,8 +289,19 @@ struct CameraCaptureView: View {
     /// Fade the chrome in, now that the interface has genuinely finished
     /// rotating. Idempotent: the coordinator callback and the backstop timer
     /// both land here, and whichever arrives second does nothing.
-    private func revealControls() {
-        guard isLandscapeLayout, !isLandscapeReady else { return }
+    ///
+    /// `force` skips the `isLandscapeLayout` gate. It exists for the hard
+    /// timeout scheduled in `.task` below: on iPad — where, unlike iPhone, the
+    /// system supports every orientation out of the box and is far less
+    /// willing to honor `InterfaceOrientationLock`'s forced single-orientation
+    /// `requestGeometryUpdate` (especially under Stage Manager/windowed
+    /// multitasking) — the interface can simply never rotate. Without a
+    /// forced path here, `isLandscapeReady` stays false forever and the whole
+    /// control layer (close button included, previously) stays invisible and
+    /// non-interactive: exactly the "unresponsive screen" App Review reported
+    /// tapping into the camera on an iPad Air.
+    private func revealControls(force: Bool = false) {
+        guard !isLandscapeReady, force || isLandscapeLayout else { return }
         // Insets are only final once the rotation is over, so re-read them
         // here rather than trusting the pair taken mid-transition.
         safeArea = Self.windowSafeArea()
@@ -401,6 +412,25 @@ struct CameraCaptureView: View {
                     // there's nothing to wait for, since holding the controls
                     // on screen through the turn is the artefact, not the fix.
                     isLandscapeReady = false
+
+                    // On iPad, hiding must not be permanent. Portrait is a
+                    // supported orientation the interface can simply stay in —
+                    // the forced landscape lock is routinely declined there —
+                    // and nothing else would ever bring the chrome back, so
+                    // the first turn of the device would strand the screen with
+                    // a live viewfinder and a lone close button: the same
+                    // complaint App Review filed, one rotation later. Re-arm
+                    // the same backstop that covers the initial open.
+                    //
+                    // iPhone is portrait-only, so leaving landscape there means
+                    // the camera is already on its way out; restoring chrome
+                    // over a portrait layout is exactly what must not happen.
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(1200))
+                            revealControls(force: true)
+                        }
+                    }
                     return
                 }
 
@@ -422,6 +452,17 @@ struct CameraCaptureView: View {
             maxVideoDuration = VideoDuration(clamping: context.maxClipDuration)
             camera.startIfAvailable(maxDuration: maxDuration)
             InterfaceOrientationLock.lockLandscape()
+            // Backstop: guarantee the chrome appears even if the forced
+            // rotation this just requested never actually completes — see
+            // `revealControls(force:)` above. `RotationSettleReporter` only
+            // ever fires from a real UIKit rotation transition, so a request
+            // that gets silently declined (routine on iPad) would otherwise
+            // leave this screen permanently stuck with no visible close
+            // button or shutter.
+            Task {
+                try? await Task.sleep(for: .milliseconds(1200))
+                revealControls(force: true)
+            }
 #if DEBUG
             // Screenshot hook: open the looks carousel and pre-select a look so a
             // static capture shows the full creative surface.
@@ -646,6 +687,12 @@ struct CameraCaptureView: View {
     /// trailing side.
     private var topBand: some View {
         HStack(alignment: .center) {
+            // Deliberately *not* gated by `ControlsReady`: this is the one way
+            // out of the camera screen, and it must never be hidden behind the
+            // landscape-rotation reveal. If the forced rotation never
+            // completes (see `revealControls(force:)`), everything else in
+            // this band still recovers within the backstop timeout — but the
+            // close button can't afford to wait even that long.
             closeButton
             Spacer(minLength: 12)
             // Zero spacing on purpose: every control carries a 44pt tap target
@@ -657,9 +704,9 @@ struct CameraCaptureView: View {
                 looksButton
                 durationPill
             }
+            .modifier(ControlsReady(ready: isLandscapeReady))
         }
         .frame(height: topBandHeight)
-        .modifier(ControlsReady(ready: isLandscapeReady))
     }
 
     /// Bottom-edge cluster floating over the image, holding the capture-mode
@@ -1704,9 +1751,9 @@ final class CameraModel: NSObject, ObservableObject {
                 // both get past the guard above before either has started.
                 guard !self.session.isRunning else { return }
                 // No take can be in flight before the session has started, so
-                // there is no angle to lock — the coordinator pushes the live
-                // one as soon as it's tracking.
-                self.configure(position: position, lockedAngle: nil)
+                // there is no angle to preserve — the coordinator pushes the
+                // live one as soon as it's tracking.
+                self.configure(position: position, recording: nil)
                 self.session.startRunning()
             }
         }
@@ -1719,10 +1766,10 @@ final class CameraModel: NSObject, ObservableObject {
     /// copy of it, and so a flip that lands mid-reconfigure still configures
     /// for the camera that flip actually asked for.
     ///
-    /// `lockedAngle` is non-nil only when a take is in flight: mid-recording,
-    /// the new camera's connection has to come up at the angle the take
-    /// started at rather than at the live one. See the call site in `flip()`.
-    private func configure(position: AVCaptureDevice.Position, lockedAngle: CGFloat?) {
+    /// `recording` is non-nil only when a take is in flight: mid-recording, the
+    /// new camera's connection has to come up at an angle that keeps the open
+    /// file coherent rather than at the live one. See the call site in `flip()`.
+    private func configure(position: AVCaptureDevice.Position, recording: RecordingRotation?) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
 
         session.beginConfiguration()
@@ -1769,7 +1816,12 @@ final class CameraModel: NSObject, ObservableObject {
         // hop below would let a few frames through at the sensor's default
         // rotation — and mid-flip that means frames of the wrong shape landing
         // in an already-open file.
-        if let lockedAngle { pushRotation(lockedAngle) }
+        //
+        // Resolved here too, rather than reused from the outgoing camera: the
+        // angle that is level for one camera is not the angle that is level for
+        // the other. See `swapRotationAngle`.
+        let swappedAngle = recording.map { swapAngle(for: activeDevice, $0) }
+        if let swappedAngle { pushRotation(swappedAngle) }
         pinOutputMirroring()
         session.commitConfiguration()
 
@@ -1785,15 +1837,15 @@ final class CameraModel: NSObject, ObservableObject {
             // preview mirrors the camera that is live rather than the one a
             // flip has already optimistically recorded on the main thread.
             self.isFrontCamera = position == .front
-            // A take in flight keeps the angle it started at — catching the
-            // connections up on the live one would splice two orientations into
-            // the open file. `recordClip`'s completion is what catches them up
-            // once the file is closed. Re-pushed rather than skipped: whether a
-            // swapped connection is reachable from inside the configuration
+            // A take in flight keeps the orientation it started at — catching
+            // the connections up on the live one would splice two orientations
+            // into the open file. `recordClip`'s completion is what catches them
+            // up once the file is closed. Re-pushed rather than skipped: whether
+            // a swapped connection is reachable from inside the configuration
             // block isn't guaranteed, and pushing the same angle twice costs
             // nothing.
-            if let lockedAngle {
-                self.pushRotation(lockedAngle)
+            if let swappedAngle {
+                self.pushRotation(swappedAngle)
             } else {
                 self.reapplyRotation()
             }
@@ -1840,6 +1892,60 @@ final class CameraModel: NSObject, ObservableObject {
             let angle = coordinator.videoRotationAngleForHorizonLevelCapture
             Task { @MainActor [weak self] in self?.apply(rotationAngle: angle) }
         }
+    }
+
+    /// What a flip landing mid-take needs to know to keep the open file
+    /// coherent across the camera swap. Assembled by `flip()`.
+    private struct RecordingRotation {
+        /// The angle the file's frames are actually arriving at, read off the
+        /// connection rather than from `rotationAngle`: a turn of the phone
+        /// mid-take updates the latter (the viewfinder keeps following the
+        /// horizon) but is deliberately never pushed at the connections, so the
+        /// two can already have drifted apart before the flip.
+        var locked: CGFloat
+        /// The outgoing camera's level angle for the phone's *current* posture.
+        var outgoingLive: CGFloat
+    }
+
+    /// Resolves the angle the incoming camera's connections should come up at
+    /// mid-take, by asking that camera's own rotation coordinator where level
+    /// is. Returns `r.locked` unchanged if there's no device to ask.
+    private func swapAngle(for device: AVCaptureDevice?, _ r: RecordingRotation) -> CGFloat {
+        guard let device else { return r.locked }
+        let incomingLive = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+            .videoRotationAngleForHorizonLevelCapture
+        return Self.swapRotationAngle(locked: r.locked,
+                                      outgoingLive: r.outgoingLive,
+                                      incomingLive: incomingLive)
+    }
+
+    /// The angle the incoming camera needs so a take already in flight keeps
+    /// the orientation it started at.
+    ///
+    /// Front and back cameras are mounted with different sensor orientations,
+    /// so the angle that is level for one is not the angle that is level for
+    /// the other — most often the two are a full 180° apart. Carrying the
+    /// outgoing camera's angle straight over to the incoming one, which is what
+    /// a mid-take flip used to do to hold the frame *shape* steady, did keep the
+    /// file's dimensions but stood every frame after the flip on its head.
+    ///
+    /// What carries over correctly is the *difference* between the two cameras'
+    /// level angles for the phone's current posture, applied to the angle the
+    /// file is already being written at. A take started in portrait then stays
+    /// portrait-up even if the phone has since been turned — mid-take turns are
+    /// deliberately not pushed — while the mounting difference is corrected for.
+    ///
+    /// Returns `locked` unchanged if the result would transpose the frame: a
+    /// movie's dimensions are fixed by its first frame, so 0↔180 and 90↔270 can
+    /// be spliced into an open file but crossing between those pairs cannot.
+    /// That only comes up on a device whose two cameras are mounted a quarter
+    /// turn apart, where an upright-but-sideways clip beats a rescaled one.
+    static func swapRotationAngle(locked: CGFloat, outgoingLive: CGFloat, incomingLive: CGFloat) -> CGFloat {
+        let corrected = (locked + incomingLive - outgoingLive).truncatingRemainder(dividingBy: 360)
+        let normalized = corrected < 0 ? corrected + 360 : corrected
+        let shapeDelta = abs(normalized - locked).truncatingRemainder(dividingBy: 180)
+        let preservesFrameShape = shapeDelta < 1 || shapeDelta > 179
+        return preservesFrameShape ? normalized : locked
     }
 
     /// Re-pushes the current angle. Cheap and idempotent, so the view can call
@@ -1919,15 +2025,22 @@ final class CameraModel: NSObject, ObservableObject {
     func flip() {
         currentPosition = currentPosition == .back ? .front : .back
         let position = currentPosition
-        // A take in flight keeps the angle it started at. The new camera's
-        // connection comes up at its sensor default, and letting that — or the
-        // live coordinator angle — land mid-file would change the shape of the
-        // frames going into an already-open movie. Read here on the main
-        // thread, where `rotationAngle` and `isRecording` live.
-        let lockedAngle = isRecording ? rotationAngle : nil
+        // A take in flight keeps the orientation it started at: the new
+        // camera's connection comes up at its sensor default, and letting that
+        // land mid-file would change the shape of the frames going into an
+        // already-open movie. Read here on the main thread, where
+        // `rotationAngle` and `isRecording` live; the angle the file is being
+        // written at comes off the connection itself, on the session queue.
+        let recording = isRecording
+        let outgoingLive = rotationAngle
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.configure(position: position, lockedAngle: lockedAngle)
+            let rotation = recording
+                ? self.videoOutput.connection(with: .video).map {
+                    RecordingRotation(locked: $0.videoRotationAngle, outgoingLive: outgoingLive)
+                }
+                : nil
+            self.configure(position: position, recording: rotation)
             // A torch belongs to the device, not the session: re-assert it
             // after the swap so a lit flash survives flipping to a camera that
             // has one. On the main thread, since it resolves the device

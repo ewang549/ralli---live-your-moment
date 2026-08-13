@@ -80,6 +80,16 @@ final class SpotSearchModel: NSObject, MKLocalSearchCompleterDelegate, CLLocatio
     private let locationManager = CLLocationManager()
     private var knownSearchTask: Task<Void, Never>?
 
+    /// The most recent fix, kept so "use current location" can answer instantly
+    /// when search biasing has already asked for one.
+    private var lastFix: CLLocation?
+    /// Everyone waiting on the next fix. A list rather than a single
+    /// continuation because the delegate is the only place a fix arrives, and it
+    /// has to be able to answer every caller that queued up behind it — and
+    /// resume *all* of them on a failure or a refusal, or the button spins
+    /// forever.
+    private var fixWaiters: [CheckedContinuation<CLLocation?, Never>] = []
+
     /// A place resolved to real coordinates, ready to confirm.
     struct PendingSpot: Equatable {
         var name: String
@@ -143,6 +153,135 @@ final class SpotSearchModel: NSObject, MKLocalSearchCompleterDelegate, CLLocatio
             }
         }
     }
+
+    /// Resolves wherever the phone is standing into a place you can post,
+    /// without typing anything.
+    ///
+    /// The location fix on its own is just a coordinate — a beacon needs a place
+    /// with a name, so the fix is turned into a real `MKMapItem` before it
+    /// becomes a `PendingSpot`. From there this is the ordinary flow: the same
+    /// map confirmation covers it, and `confirm()` upserts it like any other.
+    func useCurrentLocation() {
+        guard !isResolving else { return }
+        isResolving = true
+        errorMessage = nil
+        Task {
+            defer { isResolving = false }
+            guard let location = await currentFix() else {
+                errorMessage = locationManager.authorizationStatus == .denied
+                    || locationManager.authorizationStatus == .restricted
+                    ? "Allow location access in Settings to use where you are."
+                    : "Couldn't get your location. Try searching instead."
+                return
+            }
+            guard let resolved = await Self.place(at: location) else {
+                errorMessage = "Couldn't work out where you are. Try searching instead."
+                return
+            }
+            pending = resolved
+        }
+    }
+
+    /// The current fix, waiting for one if the manager hasn't produced it yet.
+    ///
+    /// Capped rather than open-ended: `requestLocation` can sit indefinitely
+    /// indoors or on a simulator with no location set, and a button that spins
+    /// forever is worse than one that says it couldn't.
+    private func currentFix() async -> CLLocation? {
+        // A fix from the last couple of minutes is still where you are, and
+        // reusing it makes the common case — the biasing request already
+        // answered — instant.
+        if let lastFix, lastFix.timestamp.timeIntervalSinceNow > -120 { return lastFix }
+
+        let status = locationManager.authorizationStatus
+        guard status != .denied && status != .restricted else { return nil }
+        if status == .notDetermined {
+            // The delegate requests a fix once permission lands.
+            locationManager.requestWhenInUseAuthorization()
+        } else {
+            locationManager.requestLocation()
+        }
+
+        let waited = await withTaskGroup(of: CLLocation?.self) { group in
+            group.addTask { @MainActor in
+                await withCheckedContinuation { continuation in
+                    self.fixWaiters.append(continuation)
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(12))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        // The timeout arm leaves a continuation parked; releasing it here keeps
+        // a later fix from resuming a waiter this call has already abandoned.
+        if waited == nil { deliverFix(nil) }
+        return waited ?? lastFix
+    }
+
+    /// Resumes everyone waiting on a fix, and remembers it for the next caller.
+    private func deliverFix(_ location: CLLocation?) {
+        if let location { lastFix = location }
+        let waiters = fixWaiters
+        fixWaiters = []
+        for waiter in waiters { waiter.resume(returning: location) }
+    }
+
+    /// Turns a coordinate into a named place.
+    ///
+    /// Points of interest first, because a POI carries the two things a spot
+    /// wants and a coordinate doesn't: a real name and a category. Reverse
+    /// geocoding is the fallback — standing in the middle of a park or on a
+    /// residential street matches no POI, and an address is still a place worth
+    /// logging.
+    private static func place(at location: CLLocation) async -> PendingSpot? {
+        let nearby = MKLocalPointsOfInterestRequest(center: location.coordinate, radius: 150)
+        if let response = try? await MKLocalSearch(request: nearby).start(),
+           let item = bestPlace(in: response.mapItems, near: location) {
+            return PendingSpot(name: item.name ?? "Current location",
+                               address: address(for: item, fallback: ""),
+                               category: item.pointOfInterestCategory?.rawValue ?? "",
+                               coordinate: item.placemark.coordinate,
+                               existing: nil)
+        }
+
+        guard let request = MKReverseGeocodingRequest(location: location),
+              let item = try? await request.mapItems.first else { return nil }
+        return PendingSpot(name: item.name ?? "Current location",
+                           address: address(for: item, fallback: ""),
+                           category: item.pointOfInterestCategory?.rawValue ?? "",
+                           coordinate: item.placemark.coordinate,
+                           existing: nil)
+    }
+
+    /// Which of the nearby results is the place a person would say they're at.
+    ///
+    /// Neither the nearest nor simply the first. MapKit indexes a building's
+    /// fittings alongside the building, and at the Ferry Building both the
+    /// closest result and the top-ranked one are literally "Elevator". What
+    /// separates those from the building is that they carry no
+    /// `pointOfInterestCategory` — a real destination is categorised, a fitting
+    /// inside one generally isn't. So: categorised places first, minus the
+    /// categories that are still plumbing, in MapKit's own relevance order.
+    private static func bestPlace(in items: [MKMapItem], near location: CLLocation) -> MKMapItem? {
+        let named = items.filter { !($0.name ?? "").isEmpty }
+        let places = named.filter { item in
+            guard let category = item.pointOfInterestCategory else { return false }
+            return !infrastructure.contains(category)
+        }
+        // Falls back through each narrowing, so somewhere with nothing but an
+        // uncategorised result still resolves rather than dropping to a bare
+        // address.
+        return places.first ?? named.first ?? items.first
+    }
+
+    /// Categorised, but still part of a place rather than a place to be at.
+    private static let infrastructure: Set<MKPointOfInterestCategory> = [
+        .restroom, .parking, .mailbox, .atm, .evCharger, .publicTransport
+    ]
 
     /// Picks a spot Ralli already has — no map resolution needed, it already
     /// carries its coordinates.
@@ -221,14 +360,26 @@ final class SpotSearchModel: NSObject, MKLocalSearchCompleterDelegate, CLLocatio
                 latitudinalMeters: 30_000,
                 longitudinalMeters: 30_000
             )
+            self.deliverFix(location)
         }
     }
 
-    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // Search still works without a fix, but anyone blocked on "use current
+        // location" has to be told, or the button spins until the timeout.
+        Task { @MainActor in self.deliverFix(nil) }
+    }
 
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         guard manager.authorizationStatus == .authorizedWhenInUse
-                || manager.authorizationStatus == .authorizedAlways else { return }
+                || manager.authorizationStatus == .authorizedAlways else {
+            // A refusal is an answer: release the waiters rather than leaving
+            // them for the timeout.
+            if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+                Task { @MainActor in self.deliverFix(nil) }
+            }
+            return
+        }
         manager.requestLocation()
     }
 }
@@ -293,6 +444,17 @@ struct SpotSearchView: View {
     private var results: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
+                // First, and above both result sections: the whole point is that
+                // it's reachable before you've typed anything, and the most
+                // common answer to "where are you" is "here".
+                row(title: "Use current location",
+                    subtitle: "Find the place you're standing in",
+                    icon: "location.fill",
+                    tint: Theme.accent) {
+                    model.useCurrentLocation()
+                }
+                .padding(.top, 4)
+
                 if !model.knownSpots.isEmpty {
                     sectionHeader("Already on Ralli")
                     ForEach(model.knownSpots) { spot in
@@ -345,7 +507,7 @@ struct SpotSearchView: View {
             Text("Where are you?")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
-            Text("Type a place name to find it on the map.")
+            Text("Use your current location, or type a place name to find it on the map.")
                 .font(.caption)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)

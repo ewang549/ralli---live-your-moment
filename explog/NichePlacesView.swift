@@ -789,7 +789,7 @@ struct SpotDetailView: View {
                             Text(spot.name)
                                 .font(.title2.weight(.bold))
                                 .foregroundStyle(Theme.textPrimary)
-                            Text("\(spot.category) · \(spot.distanceMiles, specifier: "%.1f") mi away")
+                            Text("\(POICategoryLabel.display(spot.category)) · \(spot.distanceMiles, specifier: "%.1f") mi away")
                                 .font(.subheadline)
                                 .foregroundStyle(Theme.textSecondary)
                         }
