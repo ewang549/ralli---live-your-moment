@@ -1,6 +1,6 @@
 # Ralli
 
-**Life, on the hour.**
+**Live your moment.**
 
 Ralli is a native iOS social app built around one idea: capture one honest, unedited moment of your day, once per hour, and send it directly to the specific friends you choose — not broadcast to a public feed by default.
 
