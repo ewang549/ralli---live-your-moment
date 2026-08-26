@@ -4,9 +4,10 @@
 
 Ralli is a native iOS social app built around one idea: capture one honest, unedited moment of your day, once per hour, and send it directly to the specific friends you choose — not broadcast to a public feed by default.
 
-> Bundle ID: `com.ej.explog` · formerly developed under the working name **"Explog"**
+**[Download on the App Store](https://apps.apple.com/us/app/6794475537)**
 
-Share one honest moment a day with your closest friends, discover what's happening nearby, and never miss a plan again.
+**Stack:** Swift · SwiftUI · SwiftData · Firebase (Auth, Firestore, Cloud Functions, Storage, FCM) · Stream Chat SDK · AVFoundation
+~23,500 lines of Swift · ~3,000 lines of Cloud Functions (Node.js)
 
 ---
 
@@ -112,7 +113,7 @@ Developed in Xcode, version-controlled with Git, hosted on GitHub. Feature-branc
 
 ## Project Status
 
-Ralli is in **active beta development**, distributed via **TestFlight** ahead of a full App Store release. The core feature set — hourly logs, Pulse, Places, Beacons, Daily Recap, chat, notifications, friend graph — is built and functional. Ongoing work includes:
+Ralli is **live on the App Store**, with continued TestFlight betas for early access to new features. The core feature set — hourly logs, Pulse, Places, Beacons, Daily Recap, chat, notifications, friend graph — is built and functional. Ongoing work includes:
 
 - Performance optimization (log-load speed, message-send latency)
 - UI consistency fixes (aspect-ratio handling across feed screens, light/dark mode support)
