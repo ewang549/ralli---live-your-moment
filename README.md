@@ -122,11 +122,4 @@ Ralli is **live on the App Store**, with continued TestFlight betas for early ac
 
 ---
 
-## Framing for Writing About Ralli
 
-Useful angles for essays, pitches, or articles:
-
-- **The authenticity/anti-algorithm thesis** — positioned against curated social media, in the lineage of BeReal but differentiated by hourly (not daily) cadence and recipient-scoped (not broadcast) sharing.
-- **The "close friends" thesis** — optimizes for small, real friend groups rather than public reach, follower counts, or algorithmic distribution: a bet that the future of social apps is smaller and more intentional, not bigger and more viral.
-- **The multi-feature ecosystem thesis** — not just a camera app; it bundles hourly logging with local discovery (Places) and real-time coordination (Beacons), on the premise that "what my friends are doing right now," "where should I go," and "let's meet up" are naturally connected problems.
-- **The engineering-craft angle** — a native, from-scratch iOS app with a deliberate, principled architecture: real-time chat via Stream rather than reinventing messaging infrastructure, careful attention to never degrading video quality/framing, and a security model where the client is never trusted to enforce its own business rules.
