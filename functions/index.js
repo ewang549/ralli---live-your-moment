@@ -32,6 +32,112 @@ const RESERVED_HANDLES = new Set([
   "settings", "login", "signup", "me", "you", "null", "undefined",
 ]);
 
+// ---------------------------------------------------------------------------
+// Content filtering
+//
+// App Store Guideline 1.2 asks a user-generated-content app for four things.
+// Reporting, blocking and published contact details are elsewhere in this file
+// and in the client; this is the fourth — "a method for filtering objectionable
+// material from being posted to the app".
+//
+// It runs on the server rather than only in the client because the client is
+// the part an attacker controls: the callable is the actual chokepoint through
+// which caption, comment, place and beacon text reaches another user. The
+// client runs the same check first (see `ContentFilter.swift`) so the person
+// typing gets told immediately instead of after a round trip.
+//
+// A word list is a floor, not a ceiling. It catches the unambiguous cases and
+// nothing else — evasion via spacing and homoglyphs is normalized away below,
+// but real coverage eventually means a moderation API (Stream's moderation is
+// already available on this account) plus the human review queue in `reports`.
+// ---------------------------------------------------------------------------
+
+// Unambiguous terms only. Anything context-dependent belongs in the report
+// queue, where a human decides, rather than here where a false positive blocks
+// a legitimate post with no recourse.
+const BLOCKED_TERMS = [
+  // Slurs.
+  "nigger", "nigga", "faggot", "fag", "kike", "spic", "chink", "wetback",
+  "tranny", "retard", "retarded", "coon", "gook", "raghead", "beaner",
+  // Sexual content. Context-dependent words ("escort") are deliberately absent
+  // — a police escort and a Ford Escort are not this, and a filter that can't
+  // tell should defer to the report queue rather than block the post.
+  "porn", "pornhub", "xvideos", "onlyfans", "cumshot", "blowjob", "handjob",
+  "creampie", "gangbang", "hentai", "milf", "nudes", "camgirl",
+  // Sexual content involving minors — zero tolerance, no near-miss allowance.
+  "childporn", "cp0rn", "lolicon", "shotacon", "jailbait", "pedo", "pedophile",
+  // Solicitation that shows up in this shape of app.
+  "sellingnudes", "sexcam", "hookupnow",
+];
+
+// Built once, with every letter allowed to repeat: "nigger" becomes
+// `n+i+g+g+e+r+`, so "niiiigger" and "nnnigger" match without the text having to
+// be collapsed first. Collapsing was the obvious approach and is wrong —
+// squashing runs turns "coon" into "con" and starts rejecting "con artist".
+//
+// Word boundaries are what keep "Scunthorpe" and "assess" out of it, and they
+// still hold under the quantifiers: `n+i+g+g+e+r+` needs two g's, so "Niger"
+// doesn't match.
+const BLOCKED_PATTERN = new RegExp(
+  `\\b(${BLOCKED_TERMS.map((term) => term.split("").map((c) => `${c}+`).join("")).join("|")})\\b`,
+  "i"
+);
+
+/**
+ * Folds the cheap evasions into a comparable form: leetspeak digits and the
+ * separator characters used to break up a word while leaving it readable
+ * ("n.i.g.g.e.r", "f a g"). Repeated letters are handled by the pattern, not
+ * here.
+ *
+ * Deliberately lossy — the result is only ever compared, never stored or shown.
+ */
+function normalizeForModeration(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFKD")
+    // Strip combining marks, which are the other way to draw a letter.
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[0]/g, "o")
+    .replace(/[1|!]/g, "i")
+    .replace(/[3]/g, "e")
+    .replace(/[4@]/g, "a")
+    .replace(/[5$]/g, "s")
+    .replace(/[7]/g, "t")
+    // Collapse anything that isn't a letter or digit to a single space, so
+    // separator-spaced evasions rejoin when the caller removes the spaces.
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** True when `text` contains an unambiguously objectionable term. */
+function containsObjectionable(text) {
+  if (typeof text !== "string" || !text) return false;
+  const normalized = normalizeForModeration(text);
+  if (BLOCKED_PATTERN.test(normalized)) return true;
+  // Second pass with separators removed catches "f.a.g" / "n i g g e r", which
+  // survive the first pass as separate one-letter tokens.
+  return BLOCKED_PATTERN.test(normalized.replace(/ /g, ""));
+}
+
+/**
+ * `cleanText` plus the filter: trims, clamps, and refuses outright when the
+ * result is objectionable.
+ *
+ * Rejects rather than silently redacting, because a post that quietly loses
+ * its caption reads as a bug to the author and teaches them nothing about the
+ * rule they broke.
+ */
+function moderateText(raw, max, label) {
+  const text = cleanText(raw, max);
+  if (containsObjectionable(text)) {
+    throw new HttpsError(
+      "invalid-argument",
+      `That ${label} breaks Ralli's community guidelines. Ralli has zero tolerance for objectionable content.`
+    );
+  }
+  return text;
+}
+
 // Unambiguous alphabet: no 0/O/1/I/L to keep codes readable out loud.
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 6;
@@ -70,6 +176,12 @@ function normalizeHandle(raw) {
   }
   if (RESERVED_HANDLES.has(handle)) {
     throw new HttpsError("invalid-argument", "That handle is reserved.");
+  }
+  // A handle is the most widely shown piece of user-chosen text in the app —
+  // it appears anywhere the account does — so it goes through the same filter
+  // as anything else a user writes.
+  if (containsObjectionable(handle)) {
+    throw new HttpsError("invalid-argument", "That handle isn't available.");
   }
   return handle;
 }
@@ -577,7 +689,7 @@ exports.createProfile = onCall(async (request) => {
   }
 
   const handle = normalizeHandle(data.handle);
-  const name = typeof data.name === "string" ? data.name.trim().slice(0, 40) : "";
+  const name = moderateText(data.name, 40, "name");
   if (!name) {
     throw new HttpsError("invalid-argument", "Name is required.");
   }
@@ -1180,7 +1292,7 @@ const REPORT_REASONS = new Set([
   "self_harm", "other",
 ]);
 
-const REPORT_TARGET_TYPES = new Set(["user", "log", "message"]);
+const REPORT_TARGET_TYPES = new Set(["user", "log", "message", "comment", "beacon"]);
 
 /**
  * Writes one report doc. Clients never touch `reports` directly — the rules
@@ -1357,6 +1469,11 @@ exports.publishLog = onCall(async (request) => {
     throw new HttpsError("invalid-argument", "Unknown log kind.");
   }
 
+  // Checked here rather than where the document is assembled, so a refused
+  // caption costs one round trip instead of the rate-limit slot and the spot
+  // and profile reads below.
+  const caption = moderateText(data.caption, 140, "caption");
+
   const storagePath = cleanText(data.storagePath, 512);
   const mediaURL = cleanText(data.mediaURL, 2048);
 
@@ -1452,7 +1569,7 @@ exports.publishLog = onCall(async (request) => {
     kind,
     storagePath: storagePath || null,
     mediaURL: mediaURL || null,
-    caption: cleanText(data.caption, 140),
+    caption,
     emoji: cleanText(data.emoji, 8) || "✨",
     hueA: cleanHue(data.hueA),
     hueB: cleanHue(data.hueB),
@@ -1875,7 +1992,7 @@ exports.addComment = onCall(async (request) => {
   const uid = requireAuth(request);
   const data = request.data || {};
   const logId = requireUidArg(data.logId, "logId");
-  const text = cleanText(data.text, COMMENT_MAX);
+  const text = moderateText(data.text, COMMENT_MAX, "comment");
   if (!text) {
     throw new HttpsError("invalid-argument", "A comment needs some text.");
   }
@@ -2060,7 +2177,7 @@ exports.upsertSpot = onCall(async (request) => {
   const uid = requireAuth(request);
   const data = request.data || {};
 
-  const name = cleanText(data.name, 120);
+  const name = moderateText(data.name, 120, "place name");
   if (!name) throw new HttpsError("invalid-argument", "A place needs a name.");
 
   const latitude = cleanCoordinate(data.latitude, 90);
@@ -2090,7 +2207,7 @@ exports.upsertSpot = onCall(async (request) => {
     name,
     nameLower: name.toLowerCase(),
     category: cleanText(data.category, 60),
-    summary: cleanText(data.summary, 280),
+    summary: moderateText(data.summary, 280, "description"),
     address: cleanText(data.address, 240),
     latitude,
     longitude,
@@ -2251,7 +2368,7 @@ exports.createBeacon = onCall(async (request) => {
   const uid = requireAuth(request);
   const data = request.data || {};
 
-  const note = cleanText(data.note, 280);
+  const note = moderateText(data.note, 280, "beacon note");
 
   // A host may only point a beacon at their own upload. Without the path check
   // the URL is just a string the client chose, and any image on the bucket

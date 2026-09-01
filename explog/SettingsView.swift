@@ -35,6 +35,7 @@ struct SettingsView: View {
                         contactSection
                         notificationsSection
                         accountSection
+                        LegalLinksSection()
                         dangerSection
 #if DEBUG
                         developerSection

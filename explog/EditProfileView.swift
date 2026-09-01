@@ -32,6 +32,7 @@ struct EditProfileView: View {
                         privacyToggle
                         identityFields
                         bioField
+                        guidelinesWarning
                         interestChips
                     }
                     .padding(.horizontal, 20)
@@ -173,7 +174,39 @@ struct EditProfileView: View {
         ["name": me.name, "city": me.city, "bio": me.bio, "isPrivate": me.isPrivate]
     }
 
+    /// Whether anything on this screen would be published as objectionable.
+    ///
+    /// These three fields are the app's one piece of user-authored text that
+    /// never passes through a Cloud Function — `updateSoftFields` writes them
+    /// straight to Firestore under the `onlySoftProfileFields` rule — so this
+    /// check is the only thing standing between them and every other user.
+    private var violatingField: String? {
+        if ContentFilter.isObjectionable(me.name) { return "name" }
+        if ContentFilter.isObjectionable(me.bio) { return "bio" }
+        if ContentFilter.isObjectionable(me.city) { return "city" }
+        return nil
+    }
+
+    @ViewBuilder
+    private var guidelinesWarning: some View {
+        if let violatingField {
+            Label("Your \(violatingField) breaks Ralli's community guidelines and won't be saved. "
+                  + "Ralli has zero tolerance for objectionable content.",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(Theme.accent)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func scheduleProfileSync() {
+        // Nothing leaves the device while a field is in violation. The edit
+        // stays visible locally so it can be corrected rather than being
+        // reverted under the person typing; it just never becomes public.
+        guard violatingField == nil else {
+            profileSyncTask?.cancel()
+            return
+        }
         let fields = softFields
         profileSyncTask?.cancel()
         profileSyncTask = Task {
@@ -186,6 +219,10 @@ struct EditProfileView: View {
     /// Sends the current values immediately, without the debounce — for when
     /// the screen is closing and there may be no later chance.
     private func flushProfileSync() {
+        guard violatingField == nil else {
+            profileSyncTask?.cancel()
+            return
+        }
         let fields = softFields
         profileSyncTask?.cancel()
         Task { try? await FirestoreService.updateSoftFields(fields) }

@@ -2,10 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Push notifications are real: APNs/FCM via PushNotifications.swift and
+	     AppDelegate. Nothing else belongs in this array — a background mode with
+	     no feature behind it is what got the app rejected for bluetooth-peripheral. -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
-		<string>bluetooth-peripheral</string>
 	</array>
+	<!-- Ralli uses only standard HTTPS/TLS (Firebase, Stream), which is exempt.
+	     Declaring it here answers the export-compliance question at build time
+	     instead of on every upload. Revisit if any custom or non-exempt
+	     cryptography is ever added. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

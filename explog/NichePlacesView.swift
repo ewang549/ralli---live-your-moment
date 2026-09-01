@@ -495,6 +495,9 @@ struct CommentsSheet: View {
     /// True while a comment is on its way up, so the send button can't fire the
     /// same text twice.
     @State private var posting = false
+    /// Why the last comment didn't send — a guidelines refusal or a failed
+    /// request. Cleared as soon as the draft changes.
+    @State private var postError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -520,6 +523,13 @@ struct CommentsSheet: View {
                                 .font(.subheadline)
                                 .foregroundStyle(Theme.textPrimary)
                         }
+                        // Guideline 1.2 wants reporting and blocking wherever
+                        // someone else's content appears, and comments on a
+                        // public place post are the one UGC surface that had
+                        // neither. Rows written before the backend existed
+                        // carry no uid and have nobody to report, so they're
+                        // left plain rather than given a menu that can't file.
+                        .modifier(CommentSafety(comment: comment))
                     }
                     if clip.comments.isEmpty {
                         Text("Be the first to comment")
@@ -534,9 +544,19 @@ struct CommentsSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            if let postError {
+                Text(postError)
+                    .font(.caption)
+                    .foregroundStyle(Theme.accent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 4)
+            }
+
             HStack(spacing: 10) {
                 TextField("Add a comment…", text: $draft)
                     .textFieldStyle(.plain)
+                    .onChange(of: draft) { _, _ in postError = nil }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
                     .background {
@@ -568,10 +588,23 @@ struct CommentsSheet: View {
     private func post() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !posting else { return }
+
+        // Refused here as well as on the server so the person typing is told
+        // now, with their draft still in the field to edit, rather than having
+        // it disappear and come back as a failed request.
+        if ContentFilter.isObjectionable(text) {
+            postError = ContentFilter.rejectionMessage
+            return
+        }
+
         draft = ""
+        postError = nil
         posting = true
         Task {
-            await engagementSync.addComment(text, to: clip, context: modelContext)
+            let sent = await engagementSync.addComment(text, to: clip, context: modelContext)
+            // A rejection used to remove the optimistic row and say nothing,
+            // which reads as the comment silently vanishing.
+            if !sent { postError = engagementSync.lastError ?? ContentFilter.rejectionMessage }
             posting = false
         }
     }

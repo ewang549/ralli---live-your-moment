@@ -395,6 +395,11 @@ struct BeaconFeedCard: View {
         } message: {
             Text("You must set your profile to Public to create or join community activities.")
         }
+        // A public beacon shows a host-written note and a host-uploaded cover
+        // photo to people who have no relationship with the host, so it needs
+        // the same reporting and blocking route as any other public content
+        // (Guideline 1.2). Long-press, matching every other reportable row.
+        .modifier(BeaconSafety(beacon: beacon))
     }
 
     /// Full-bleed hero banner: the place's vibe visual anchors the card, with the

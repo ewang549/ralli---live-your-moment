@@ -206,6 +206,10 @@ struct WelcomeView: View {
     @State private var password = ""
     @State private var busy = false
     @State private var errorMessage: String?
+    /// Guideline 1.2: an account that can post user-generated content has to
+    /// have accepted the terms and the no-objectionable-content rule first.
+    /// Sign-up only — logging in means you accepted it when you signed up.
+    @State private var acceptedTerms = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -246,6 +250,12 @@ struct WelcomeView: View {
             }
             .padding(.horizontal, 28)
 
+            if mode == .signUp {
+                LegalConsentRow(accepted: $acceptedTerms)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 14)
+            }
+
             if let errorMessage {
                 Text(errorMessage)
                     .font(.caption)
@@ -284,6 +294,9 @@ struct WelcomeView: View {
             email = parts[1]
             password = parts[2]
             name = parts.count > 3 ? parts[3] : "Test User"
+            // The consent gate is a real precondition of `canSubmit` now, so
+            // the scripted path has to satisfy it the same way a person does.
+            acceptedTerms = true
             submit()
         }
 #endif
@@ -294,7 +307,7 @@ struct WelcomeView: View {
         // field would otherwise light the button up for a guaranteed failure.
         !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && password.count >= 6
-            && (mode == .logIn || !name.isEmpty)
+            && (mode == .logIn || (!name.isEmpty && acceptedTerms))
     }
 
     private func authField(_ placeholder: String, text: Binding<String>) -> some View {
@@ -307,6 +320,10 @@ struct WelcomeView: View {
 
     private func submit() {
         guard !busy else { return }
+        // The button is already disabled without consent; this makes the
+        // precondition belong to account creation itself rather than to one
+        // view's enablement rule, so a future caller can't route around it.
+        guard mode == .logIn || acceptedTerms else { return }
         busy = true
         errorMessage = nil
         // Whitespace never belongs in an email, and iOS supplies it freely:

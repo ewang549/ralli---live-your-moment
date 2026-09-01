@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import FirebaseAuth
 
 // MARK: - Safety: block & report (Phase 4)
 //
@@ -51,6 +52,8 @@ struct SafetyTarget: Equatable {
         case user
         case log
         case message
+        case comment
+        case beacon
     }
 
     let kind: Kind
@@ -71,6 +74,17 @@ struct SafetyTarget: Equatable {
 
     static func message(id: String, authorUid: String, authorName: String) -> SafetyTarget {
         SafetyTarget(kind: .message, uid: authorUid, contentId: id, displayName: authorName)
+    }
+
+    static func comment(id: String, authorUid: String, authorName: String) -> SafetyTarget {
+        SafetyTarget(kind: .comment, uid: authorUid, contentId: id, displayName: authorName)
+    }
+
+    /// A public beacon carries a host-written note and a host-uploaded cover
+    /// photo, and strangers can see both — so it needs reporting for the same
+    /// reason a public log does.
+    static func beacon(id: String, hostUid: String, hostName: String) -> SafetyTarget {
+        SafetyTarget(kind: .beacon, uid: hostUid, contentId: id, displayName: hostName)
     }
 
     var isContent: Bool { kind != .user }
@@ -232,6 +246,56 @@ struct SafetyMenuItems: View {
             presentation.blocking = target
         } label: {
             Label("Block \(target.displayName)", systemImage: "hand.raised")
+        }
+    }
+}
+
+/// Comment rows, which are the one UGC surface with two reasons to leave the
+/// menu off: your own comment has nobody to report (the server rejects
+/// self-reports outright), and comments written before the backend existed
+/// carry no author uid to report at all.
+///
+/// The decision lives in a modifier rather than at each call site so a list
+/// can apply it uniformly and let the row itself opt out.
+struct CommentSafety: ViewModifier {
+    let comment: ClipComment
+
+    private var target: SafetyTarget? {
+        let uid = comment.authorUID
+        guard !uid.isEmpty, uid != Auth.auth().currentUser?.uid else { return nil }
+        return .comment(id: comment.remoteID,
+                        authorUid: uid,
+                        authorName: comment.authorName.isEmpty ? "this person" : comment.authorName)
+    }
+
+    func body(content: Content) -> some View {
+        if let target {
+            content.safetyActions(for: target)
+        } else {
+            content
+        }
+    }
+}
+
+/// Beacon cards, which follow the same rule as comments: your own plan has
+/// nobody to report, and a local-only or demo beacon has no server id to name.
+struct BeaconSafety: ViewModifier {
+    let beacon: Beacon
+
+    private var target: SafetyTarget? {
+        let host = beacon.hostUID
+        guard !beacon.remoteID.isEmpty, !host.isEmpty,
+              host != Auth.auth().currentUser?.uid else { return nil }
+        return .beacon(id: beacon.remoteID,
+                       hostUid: host,
+                       hostName: beacon.hostName.isEmpty ? "this person" : beacon.hostName)
+    }
+
+    func body(content: Content) -> some View {
+        if let target {
+            content.safetyActions(for: target)
+        } else {
+            content
         }
     }
 }

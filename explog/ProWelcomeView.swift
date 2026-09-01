@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Whether the beta thank-you has already been shown.
+/// Whether the founding-member thank-you has already been shown.
 ///
 /// Same shape as `PushNotifications.hasPrimed`: a single `UserDefaults` flag, so
 /// it's once per install rather than once per launch. Deliberately *not* tied to
@@ -40,7 +40,7 @@ enum ProWelcome {
 #endif
 }
 
-/// One-time beta thank-you, shown ahead of sign-in on a fresh install.
+/// One-time founding-member thank-you, shown ahead of sign-in on a fresh install.
 ///
 /// Presentation only: there is no entitlement behind "Pro" yet and nothing in
 /// the app checks for one. This screen says thank you and sets the expectation;
@@ -81,7 +81,11 @@ struct ProWelcomeView: View {
             .foregroundStyle(Theme.textSecondary)
             .padding(.top, 16)
 
-            Text("Every premium feature we build, free for as long as you're with us in beta.")
+            // Deliberately says nothing about "beta", "trial", "preview" or
+            // "early access": App Review rejects a shipping binary whose UI
+            // describes itself as a pre-release version (Guideline 2.1), and
+            // this screen is the first thing a reviewer sees on a fresh install.
+            Text("Every premium feature we build, free for as long as you're with us.")
                 .font(.system(size: 15))
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
